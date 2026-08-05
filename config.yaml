@@ -27,11 +27,12 @@ demo:
 # -----------------------------------------------------------------------------
 # Storage layout
 # -----------------------------------------------------------------------------
-# On the booth box the U.2 NVMe should be mounted at /data (see README ->
-# "Staging the U.2 NVMe"). If it is not mounted, these paths fall back to the
-# repo-local ./data directory and preflight warns loudly about free space.
+# On this booth box the 3.5 TB U.2 NVMe is mounted at /mnt/nvme2n1 (verified
+# ext4, 3.3 TB free). If that mount is missing these paths fall back to the
+# repo-local ./data directory and preflight warns loudly about free space --
+# the OS drive has only ~28 GB free, far too little for the 46 GB WGS sample.
 paths:
-  data_root: "/data/genomics"
+  data_root: "/mnt/nvme2n1/genomics"
   data_root_fallback: "./data"
   runs_dir: "runs"        # relative to data_root; per-run output directories
   traces_dir: "./traces"  # recorded runs for DEMO MODE
@@ -88,14 +89,41 @@ engines:
 # NOTE: the keys are `enabled`/`disabled` rather than `on`/`off` because YAML 1.1
 # parses bare on/off as booleans, which silently breaks the lookup.
 amx:
+  # WHAT THIS TOGGLE CAN AND CANNOT SHOW -- read docs/AMX-FINDINGS.md.
+  #
+  # Measured on this box (Xeon 6740P, HG002 chr20, DeepVariant 1.10.0):
+  #
+  #   AMX OFF (fp32, AVX-512)     call_variants  0.041 s / 100 examples
+  #   AMX ON  (fp32, ISA ceiling) call_variants  0.042 s / 100 examples
+  #   AMX ON  (bf16, real AMX)    call_variants  0.064-0.066 s / 100 examples
+  #
+  # Two facts follow, both verified rather than assumed:
+  #
+  #  1. Raising the ISA ceiling alone changes NOTHING. DeepVariant's shipped
+  #     model is fp32; AMX has no fp32 path; every convolution dispatches to
+  #     brgconv:avx512_core and the tiles stay idle. End-to-end: 0.98x.
+  #
+  #  2. Forcing bf16 (which does put work on the AMX tiles -- confirmed as
+  #     brgconv:avx512_core_amx) is ~1.6x SLOWER here AND breaks correctness:
+  #     the genotype likelihoods stop summing to one and DeepVariant's own
+  #     round_gls() raises ValueError, killing a post-processing worker.
+  #
+  # So the AMX race is kept as an EVIDENCE panel, not a headline. It reports
+  # what really happened, including "AMX permitted but never used". The booth
+  # headline is the core-scaling race below, which is a real Xeon story that
+  # needs no precision trade.
   enabled:
     label: "AMX ON"
     onednn_max_cpu_isa: "AVX512_CORE_AMX"
-    description: "BF16 tiles engaged on the Xeon AMX units"
+    description: "AMX permitted (fp32 model -- tiles have no work to do)"
+    env:
+      ONEDNN_DEFAULT_FP32_MATH_MODE: "F32"
   disabled:
     label: "AMX OFF"
     onednn_max_cpu_isa: "AVX512_CORE"
     description: "AVX-512 baseline, AMX tiles disabled"
+    env:
+      ONEDNN_DEFAULT_FP32_MATH_MODE: "F32"
   # oneDNN prints the ISA it actually selected when verbose mode is on. We parse
   # that back out of the logs and display it, so the toggle is verifiable rather
   # than merely asserted.
@@ -104,6 +132,39 @@ amx:
   # Fail the run rather than quietly reporting a fake result if oneDNN ignored
   # the requested ceiling (e.g. unsupported value on this oneDNN build).
   fail_on_isa_mismatch: true
+  # Mount app/container_inject/sitecustomize.py to force TensorFlow to bf16.
+  # OFF by default because on stock DeepVariant 1.10 it is both slower and
+  # incorrect (see above). Set true only to reproduce that finding yourself --
+  # the run will hang after call_variants when the post-processing worker dies.
+  use_bf16_injection: false
+
+# ---------------------------------------------------------------------------
+# Core-scaling race -- the honest booth headline.
+#
+# Both legs run the identical binary, data, shard count and ISA settings. The
+# ONLY difference is how many logical CPUs Docker lets the container touch
+# (--cpuset-cpus). That makes the comparison trivially valid, needs no
+# precision trade, and shows the thing that is actually true about this
+# machine: variant calling scales across Xeon cores.
+scaling:
+  # Baseline core budget. Kept as a cpuset string so it is exactly what gets
+  # passed to Docker -- no arithmetic between what is configured and what runs.
+  #
+  # Measured on this box (HG002 chr20, 192 shards, both legs called exactly
+  # 210,390 variants -- identical output, so nothing was traded for the speed):
+  #
+  #    16 cores   342.7-346.6 s -> 2.78-2.86x  (two independent races)
+  #    48 cores   161.7 s    ->  1.35x
+  #    96 cores   129.5 s    ->  1.06x
+  #   192 threads 119.6 s    ->  1.00x  (reference)
+  #
+  # Scaling is sublinear past ~96 because make_examples is I/O- and
+  # Python-bound, and the last 96 are SMT siblings rather than cores. 16 is
+  # chosen as the baseline because it gives the largest honest ratio; the
+  # slower leg takes about six minutes, so pace booth visitors accordingly.
+  baseline_cpuset: "0-15"
+  baseline_label: "16 cores"
+  full_label: "all 192 threads"
 
 # -----------------------------------------------------------------------------
 # Compute / placement
@@ -123,6 +184,17 @@ compute:
   # Docker resource caps. null => uncapped.
   docker_shm_size: "16g"
   docker_memory: null
+  # File-descriptor limit inside the container. Docker's default soft limit is
+  # 1024, which 192 shards blow through instantly ("OSError: [Errno 24] Too
+  # many open files") because make_examples holds every shard's output open at
+  # once. Applied identically to both legs, so it cannot skew a comparison.
+  docker_ulimit_nofile: "65536:524288"
+  # How to invoke the container engine. Normally just ["docker"]. Override for
+  # podman, a non-PATH binary, or when a freshly granted `docker` group does
+  # not yet apply to the running login session (["sg", "docker", "-c"] needs a
+  # shell, so prefer logging out and back in). Both legs of a race always use
+  # the same value, so this cannot skew a comparison.
+  container_cli: ["docker"]
 
 # -----------------------------------------------------------------------------
 # Datasets — every URL below was verified reachable; sizes are the real
@@ -149,18 +221,23 @@ datasets:
       - url: "https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/references/GRCh38/GCA_000001405.15_GRCh38_no_alt_analysis_set.fasta.gz.gzi"
         local: "reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fasta.gz.gzi"
 
+  # Derived locally by slicing the verified GRCh38 chr20 BAM above.
+  #
+  # It is NOT the DeepVariant quickstart NA12878 BAM. That file is aligned to
+  # hg19 (chr1 LN:249250621, chrM LN:16571), so pairing it with the GRCh38
+  # reference gives "0 bases found in common among our input files" and the
+  # smoke test fails. Slicing our own GRCh38 BAM keeps the whole demo on one
+  # reference build and one sample lineage.
+  #
+  # Being derived, it has no upstream checksum: its integrity comes from the
+  # sha256-pinned parent plus the recorded region below.
   smoke_bam:
-    name: "NA12878 chr20:10.0-10.1Mb (pre-flight smoke test)"
-    url: "https://storage.googleapis.com/deepvariant/quickstart-testdata/NA12878_S1.chr20.10_10p1mb.bam"
-    local: "smoke/NA12878_S1.chr20.10_10p1mb.bam"
-    size_bytes: 3925783
-    md5_b64: "P9qUB+VLI4juycdhUR/Ylw=="
-    sha256: "0b82858821bd8817df03b35f90cdfcb2bae53af5ab46e61b8bcff1ad9ba49643"
+    name: "HG002 chr20:10.0-10.1Mb, GRCh38 (pre-flight smoke test)"
+    local: "smoke/HG002.grch38.chr20.10_10p1mb.bam"
+    derived_from: "chr20_bam"
+    derive_region: "chr20:10000000-10100000"
+    sha256: ""
     tier: "core"
-    sidecars:
-      - url: "https://storage.googleapis.com/deepvariant/quickstart-testdata/NA12878_S1.chr20.10_10p1mb.bam.bai"
-        local: "smoke/NA12878_S1.chr20.10_10p1mb.bam.bai"
-        md5_b64: "PeH7pqe1SR1BsNQmVE59+g=="
 
   chr20_bam:
     name: "HG002 NovaSeq PCR-free 35x — chr20 only"
@@ -228,12 +305,13 @@ fastq:
 # the app displays the measured time instead.
 samples:
   - id: "smoke"
-    label: "Smoke test — NA12878 chr20 100 kb"
+    label: "Smoke test — HG002 chr20 100 kb (GRCh38)"
     dataset: "smoke_bam"
     regions: "chr20:10,000,000-10,100,000"
     blurb: "Pre-flight only. Confirms the whole stack is alive in under a minute."
-    runtime_estimate_amx_on_s: 60
-    runtime_estimate_amx_off_s: 90
+    # Measured on this box: 64.6 s, 313 variants, all 192 threads.
+    runtime_fast_s: 65
+    runtime_slow_s: 90
     illustrative: true
     show_in_booth: false
 
@@ -242,9 +320,13 @@ samples:
     dataset: "chr20_bam"
     regions: "chr20"
     blurb: "The live booth run. Whole chromosome 20 at 35x depth."
-    runtime_estimate_amx_on_s: 110
-    runtime_estimate_amx_off_s: 260
-    illustrative: true
+    # MEASURED on this box, not estimated. Core-scaling race, 192 shards,
+    # 210,390 variants called identically by both legs:
+    #   16 cores  342.7-346.6 s    48 cores  161.7 s
+    #   96 cores  129.5 s          192 thr   119.6-123.2 s
+    runtime_fast_s: 123
+    runtime_slow_s: 345
+    illustrative: false
     show_in_booth: true
 
   - id: "wgs"
@@ -252,8 +334,11 @@ samples:
     dataset: "wgs_bam"
     regions: null
     blurb: "The headline run. Complete 30-35x human genome, 46 GB of aligned reads."
-    runtime_estimate_amx_on_s: 3600
-    runtime_estimate_amx_off_s: 9000
+    # Still estimates -- the full WGS BAM has not been run on this box. Scaled
+    # from the measured chr20 numbers by genome/chr20 size, which is only a
+    # rough guide because whole-genome I/O behaves differently.
+    runtime_fast_s: 3600
+    runtime_slow_s: 9000
     illustrative: true
     show_in_booth: true
 
@@ -265,7 +350,7 @@ demo_mode:
   # never -> always attempt a real run and surface the failure
   # always-> force replay (useful for a dry rehearsal)
   policy: "auto"
-  trace_file: "traces/chr20_reference_run.json"
+  trace_file: "traces/chr20-booth.json"
   # The UI shows a permanent, unmistakable banner while replaying. Non-negotiable.
   banner_text: "REPLAY MODE — recorded run, not live hardware"
 

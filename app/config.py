@@ -52,10 +52,27 @@ class Dataset:
     tier: str
     md5_b64: str | None = None
     sidecars: list[Sidecar] = field(default_factory=list)
+    # Set when the file is produced locally from another dataset rather than
+    # downloaded. Derived files have no upstream checksum to compare against;
+    # their integrity rests on the verified parent plus the recorded recipe.
+    derived_from: str | None = None
+    derive_region: str | None = None
+
+    @property
+    def is_derived(self) -> bool:
+        return bool(self.derived_from)
 
     @property
     def has_recorded_checksum(self) -> bool:
         return bool(self.sha256.strip())
+
+    @property
+    def provenance(self) -> str:
+        """One line describing where this file came from, for the UI."""
+        if self.is_derived:
+            region = f" ({self.derive_region})" if self.derive_region else ""
+            return f"derived locally from {self.derived_from}{region}"
+        return f"downloaded from {self.url}"
 
 
 @dataclass(frozen=True)
@@ -67,8 +84,8 @@ class Sample:
     dataset: str
     regions: str | None
     blurb: str
-    runtime_estimate_amx_on_s: int | None
-    runtime_estimate_amx_off_s: int | None
+    runtime_fast_s: int | None
+    runtime_slow_s: int | None
     illustrative: bool
     show_in_booth: bool
 
@@ -166,7 +183,7 @@ class Config:
             out[key] = Dataset(
                 key=key,
                 name=entry["name"],
-                url=entry["url"],
+                url=entry.get("url", ""),
                 local=entry["local"],
                 size_bytes=entry.get("size_bytes"),
                 sha256=entry.get("sha256") or "",
@@ -176,6 +193,8 @@ class Config:
                     Sidecar(url=s["url"], local=s["local"], md5_b64=s.get("md5_b64"))
                     for s in entry.get("sidecars", []) or []
                 ],
+                derived_from=entry.get("derived_from"),
+                derive_region=entry.get("derive_region"),
             )
         return out
 
@@ -196,8 +215,8 @@ class Config:
                 dataset=s["dataset"],
                 regions=s.get("regions"),
                 blurb=s.get("blurb", ""),
-                runtime_estimate_amx_on_s=s.get("runtime_estimate_amx_on_s"),
-                runtime_estimate_amx_off_s=s.get("runtime_estimate_amx_off_s"),
+                runtime_fast_s=s.get("runtime_fast_s"),
+                runtime_slow_s=s.get("runtime_slow_s"),
                 illustrative=bool(s.get("illustrative", True)),
                 show_in_booth=bool(s.get("show_in_booth", True)),
             )
@@ -257,6 +276,11 @@ class Config:
     @property
     def amx(self) -> dict[str, Any]:
         return self.raw["amx"]
+
+    @property
+    def scaling(self) -> dict[str, Any]:
+        """Core-scaling race settings. Optional; absent means the race is off."""
+        return self.raw.get("scaling", {}) or {}
 
     # -- misc sections ---------------------------------------------------
 

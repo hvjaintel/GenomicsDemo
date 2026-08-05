@@ -19,6 +19,7 @@ rather than reporting a number we cannot stand behind.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -44,6 +45,10 @@ from .parsing import (
 CONTAINER_REF_DIR = "/ref"
 CONTAINER_IN_DIR = "/input"
 CONTAINER_OUT_DIR = "/output"
+# Read-only mount point for app/container_inject, which carries the
+# sitecustomize.py that switches DeepVariant's inference to bf16.
+CONTAINER_INJECT_DIR = "/genomics-demo-inject"
+INJECT_SOURCE_DIR = Path(__file__).resolve().parent / "container_inject"
 
 
 class RunnerError(RuntimeError):
@@ -65,13 +70,36 @@ class RunSpec:
     numa_node: int = 0
     shm_size: str | None = "16g"
     memory: str | None = None
+    ulimit_nofile: str | None = "65536:524288"
+    # Docker --cpuset-cpus for this leg. This is the ONE permitted difference
+    # in a core-scaling race (see docs/AMX-FINDINGS.md for why the AMX race
+    # was retired), so like the AMX state it is excluded from the fingerprint.
+    # None means "the whole machine".
+    cpuset: str | None = None
+
+    @property
+    def core_count(self) -> int | None:
+        """How many logical CPUs this leg may use, or None for all of them."""
+        if not self.cpuset:
+            return None
+        total = 0
+        for part in self.cpuset.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                lo, hi = part.split("-", 1)
+                total += int(hi) - int(lo) + 1
+            else:
+                total += 1
+        return total
 
     def fingerprint(self) -> str:
-        """Identity of everything that must be equal across AMX ON and OFF.
+        """Identity of everything that must be equal across the two legs.
 
-        Deliberately excludes the AMX state — that is the one permitted
-        difference. The race view compares fingerprints and refuses to report a
-        speedup if they differ.
+        Deliberately excludes the AMX state and the cpuset — those are the
+        permitted differences, one per race mode. The race view compares
+        fingerprints and refuses to report a speedup if they differ.
         """
         payload = {
             "sample_id": self.sample_id,
@@ -86,6 +114,14 @@ class RunSpec:
         }
         return json.dumps(payload, sort_keys=True)
 
+    def fingerprint_digest(self) -> str:
+        """Short stable hash of the fingerprint, for display only.
+
+        Comparisons always use the full fingerprint; this is just so the UI and
+        CLI can show something a human can eyeball across two legs.
+        """
+        return hashlib.sha256(self.fingerprint().encode()).hexdigest()[:12]
+
 
 @dataclass
 class RunResult:
@@ -94,6 +130,11 @@ class RunResult:
     requested_isa: str
     reported_isa: str | None = None
     isa_verified: bool | None = None
+    # How many oneDNN compute primitives actually ran on AMX kernels. The ISA
+    # banner says what was allowed; this says what happened.
+    amx_primitives: int = 0
+    compute_primitives: int = 0
+    isa_impl_summary: str = ""
     started_at: float | None = None
     finished_at: float | None = None
     exit_code: int | None = None
@@ -148,6 +189,22 @@ class DeepVariantRunner:
         self._cancel = threading.Event()
         self._active_container: str | None = None
 
+    @property
+    def container_cli(self) -> list[str]:
+        """The container command, e.g. ["docker"] or ["podman"].
+
+        Configurable because some sites run podman, and because a freshly
+        added `docker` group membership does not apply to already-running
+        login sessions -- there, ["sg", "docker", "-c"] style wrappers or a
+        full path may be needed. It is NOT part of the run fingerprint: it
+        cannot differ between the two legs of a race, since both legs are
+        launched by this same runner instance.
+        """
+        raw = self.cfg.compute.get("container_cli") or ["docker"]
+        if isinstance(raw, str):
+            return shlex.split(raw)
+        return [str(part) for part in raw]
+
     # -- spec construction ------------------------------------------------
 
     def build_spec(self, sample_id: str, engine_key: str | None = None) -> RunSpec:
@@ -177,6 +234,7 @@ class DeepVariantRunner:
             numa_node=int(compute.get("numa_node", 0)),
             shm_size=compute.get("docker_shm_size"),
             memory=compute.get("docker_memory"),
+            ulimit_nofile=compute.get("docker_ulimit_nofile"),
         )
 
     def _reference_fasta(self) -> Path:
@@ -187,7 +245,7 @@ class DeepVariantRunner:
 
     # -- command construction ---------------------------------------------
 
-    def _env_for(self, amx_on: bool) -> dict[str, str]:
+    def _env_for(self, amx_on: bool, verbose_isa: bool = True) -> dict[str, str]:
         """Environment for one leg. The ISA ceiling is the ONLY difference."""
         isa = self.cfg.isa_for(amx_on)
         env = {
@@ -195,11 +253,31 @@ class DeepVariantRunner:
             # Legacy name, honoured by older oneDNN/TF builds. Kept in lockstep
             # so an older image cannot silently ignore the toggle.
             "DNNL_MAX_CPU_ISA": isa,
+            # We run the container as the host UID, which has no home directory
+            # inside it, so matplotlib fails to build its font cache and prints
+            # a multi-line warning per shard. With 192 shards that buries the
+            # booth log. Identical for both legs, so it changes no timing.
+            "MPLCONFIGDIR": "/tmp/matplotlib",
+            "HOME": "/tmp",
         }
-        if self.cfg.amx.get("verify_isa_from_logs", True):
+        if verbose_isa and self.cfg.amx.get("verify_isa_from_logs", True):
             verbose = str(self.cfg.amx.get("onednn_verbose", 1))
             env["ONEDNN_VERBOSE"] = verbose
             env["DNNL_VERBOSE"] = verbose
+
+        # Per-leg extras from config (e.g. the fp32 math mode). Both legs
+        # declare the SAME keys with different values, so the two commands stay
+        # structurally identical and every difference is visible in config.yaml.
+        leg = self.cfg.amx.get("enabled" if amx_on else "disabled", {})
+        for key, value in (leg.get("env") or {}).items():
+            env[str(key)] = str(value)
+
+        # bf16 auto-mixed-precision. Without it the AMX tiles never receive any
+        # work, because DeepVariant's model is fp32 and AMX has no fp32 path.
+        # See app/container_inject/sitecustomize.py for the full reasoning.
+        if self.cfg.amx.get("use_bf16_injection", True):
+            env["PYTHONPATH"] = CONTAINER_INJECT_DIR
+            env["DV_FORCE_BF16"] = "1" if amx_on else "0"
         return env
 
     def _numactl_prefix(self, spec: RunSpec) -> list[str]:
@@ -215,24 +293,36 @@ class DeepVariantRunner:
             ]
         return []
 
-    def build_command(self, spec: RunSpec, amx_on: bool, out_dir: Path) -> list[str]:
+    def build_command(
+        self, spec: RunSpec, amx_on: bool, out_dir: Path, verbose_isa: bool = True
+    ) -> list[str]:
         """Full `docker run` argv. Identical for both legs bar the ISA env."""
-        env = self._env_for(amx_on)
+        env = self._env_for(amx_on, verbose_isa)
 
         cmd: list[str] = [
-            "docker", "run", "--rm",
+            *self.container_cli, "run", "--rm",
             "--name", self._container_name(out_dir.name, amx_on),
             "-u", f"{os.getuid()}:{os.getgid()}",
             "-v", f"{spec.reference.parent}:{CONTAINER_REF_DIR}:ro",
             "-v", f"{spec.bam.parent}:{CONTAINER_IN_DIR}:ro",
             "-v", f"{out_dir}:{CONTAINER_OUT_DIR}",
         ]
+        if self.cfg.amx.get("use_bf16_injection", True):
+            # Mounted for BOTH legs, identically. Only DV_FORCE_BF16 differs,
+            # so the AMX-OFF leg loads the same file and it deliberately does
+            # nothing. Keeping the mount symmetric means the two command lines
+            # differ by environment alone.
+            cmd += ["-v", f"{INJECT_SOURCE_DIR}:{CONTAINER_INJECT_DIR}:ro"]
         for key, value in env.items():
             cmd += ["-e", f"{key}={value}"]
         if spec.shm_size:
             cmd += ["--shm-size", str(spec.shm_size)]
         if spec.memory:
             cmd += ["--memory", str(spec.memory)]
+        if spec.ulimit_nofile:
+            cmd += ["--ulimit", f"nofile={spec.ulimit_nofile}"]
+        if spec.cpuset:
+            cmd += ["--cpuset-cpus", spec.cpuset]
 
         cmd.append(spec.engine_image)
 
@@ -263,7 +353,7 @@ class DeepVariantRunner:
         self._cancel.set()
         if self._active_container:
             subprocess.run(
-                ["docker", "kill", self._active_container],
+                [*self.container_cli, "kill", self._active_container],
                 capture_output=True,
                 check=False,
             )
@@ -271,16 +361,35 @@ class DeepVariantRunner:
     def reset_cancel(self) -> None:
         self._cancel.clear()
 
-    def run(self, spec: RunSpec, amx_on: bool, run_id: str | None = None) -> Iterator[RunEvent]:
-        """Execute one leg, yielding log and progress events as it goes."""
+    def run(
+        self,
+        spec: RunSpec,
+        amx_on: bool,
+        run_id: str | None = None,
+        verbose_isa: bool = True,
+        leg_id: str | None = None,
+    ) -> Iterator[RunEvent]:
+        """Execute one leg, yielding log and progress events as it goes.
+
+        `verbose_isa` controls ONEDNN_VERBOSE. Leave it on to PROVE which
+        kernels ran; turn it off to MEASURE. The two cannot be done in the same
+        run: oneDNN prints a line per primitive execution, which on a chr20 run
+        is a 270 MB log, and bf16 emits more primitives than fp32 -- so the
+        instrumentation penalises the AMX leg specifically. Timing with verbose
+        on would understate AMX and quietly corrupt the headline number.
+
+        `leg_id` names this leg's output directory and container. The AMX race
+        derives it from the AMX state; a core-scaling race has to pass one
+        explicitly, since both of its legs share the same AMX setting.
+        """
         run_id = run_id or uuid.uuid4().hex[:8]
-        suffix = "amx-on" if amx_on else "amx-off"
+        suffix = leg_id or ("amx-on" if amx_on else "amx-off")
         out_dir = self.cfg.runs_dir / f"{run_id}-{suffix}"
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "intermediate").mkdir(exist_ok=True)
 
         requested_isa = self.cfg.isa_for(amx_on)
-        cmd = self.build_command(spec, amx_on, out_dir)
+        cmd = self.build_command(spec, amx_on, out_dir, verbose_isa)
         self._active_container = self._container_name(out_dir.name, amx_on)
 
         result = RunResult(
@@ -364,6 +473,9 @@ class DeepVariantRunner:
         result.exit_code = proc.returncode
         result.reported_isa = parser.reported_isa
         result.isa_verified = isa_is_consistent(requested_isa, parser.reported_isa)
+        result.amx_primitives = parser.isa_usage.compute_amx
+        result.compute_primitives = parser.isa_usage.compute_total
+        result.isa_impl_summary = parser.isa_usage.summary()
         result.stage_durations = {
             name: stage.duration_s
             for name, stage in parser.stages.items()
@@ -418,20 +530,28 @@ class DeepVariantRunner:
         }
 
 
-def speedup(amx_on: RunResult, amx_off: RunResult) -> float | None:
-    """AMX-ON vs AMX-OFF multiplier — only when the comparison is valid.
+def time_ratio(candidate: RunResult, baseline: RunResult) -> float | None:
+    """How many times faster `candidate` was than `baseline` — or None.
 
-    Returns None if either leg failed or if anything other than the AMX state
-    differed between them.
+    Returns None if either leg failed or if anything outside the one permitted
+    difference (the AMX state for the AMX race, the cpuset for the core-scaling
+    race) differed between them. Both of those are excluded from the
+    fingerprint, so an unequal fingerprint means the comparison is genuinely
+    invalid and no number should be shown at all.
     """
-    if not (amx_on.succeeded and amx_off.succeeded):
+    if not (candidate.succeeded and baseline.succeeded):
         return None
-    if amx_on.fingerprint != amx_off.fingerprint:
+    if candidate.fingerprint != baseline.fingerprint:
         return None
-    on_s, off_s = amx_on.wall_clock_s, amx_off.wall_clock_s
-    if not on_s or not off_s or on_s <= 0:
+    fast_s, slow_s = candidate.wall_clock_s, baseline.wall_clock_s
+    if not fast_s or not slow_s or fast_s <= 0:
         return None
-    return off_s / on_s
+    return slow_s / fast_s
+
+
+def speedup(amx_on: RunResult, amx_off: RunResult) -> float | None:
+    """AMX-ON vs AMX-OFF multiplier — only when the comparison is valid."""
+    return time_ratio(amx_on, amx_off)
 
 
 def throughput_mbases_per_hour(result: RunResult, mbases: float) -> float | None:

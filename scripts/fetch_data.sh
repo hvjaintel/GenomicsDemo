@@ -79,6 +79,19 @@ print(get_config().data_root)
 say "Config     : $CONFIG"
 say "Data root  : $DATA_ROOT"
 
+# Used only if a derived dataset needs slicing and the host has no samtools.
+ENGINE_IMAGE="$(cd "$REPO_ROOT" && GENOMICS_DEMO_CONFIG="$CONFIG" python3 -c '
+from app.config import get_config
+print(get_config().default_engine.image)
+')" || die "could not read the engine image from config.yaml"
+
+read -r -a CONTAINER_CLI <<< "$(cd "$REPO_ROOT" && GENOMICS_DEMO_CONFIG="$CONFIG" python3 -c '
+import shlex
+from app.config import get_config
+cli = get_config().compute.get("container_cli") or ["docker"]
+print(" ".join(cli) if isinstance(cli, list) else cli)
+')" || die "could not read container_cli from config.yaml"
+
 mkdir -p "$DATA_ROOT" || die "cannot create $DATA_ROOT"
 [[ -w "$DATA_ROOT" ]] || die "$DATA_ROOT is not writable"
 
@@ -89,11 +102,23 @@ MANIFEST="$(cd "$REPO_ROOT" && GENOMICS_DEMO_CONFIG="$CONFIG" python3 -c '
 from app.config import get_config
 cfg = get_config()
 for key, ds in cfg.datasets.items():
+    if ds.is_derived:
+        continue  # built locally after the downloads, see "Derived datasets"
     print("\t".join([ds.tier, ds.url, ds.local, ds.md5_b64 or "-", str(ds.size_bytes or 0), key]))
     for sc in ds.sidecars:
         # A sidecar inherits its parent tier; size is unknown so we skip the check.
         print("\t".join([ds.tier, sc.url, sc.local, sc.md5_b64 or "-", "0", key + ":sidecar"]))
 ')" || die "could not build manifest from config.yaml"
+
+# Datasets produced locally by slicing a verified parent: key, parent, region, local
+DERIVED="$(cd "$REPO_ROOT" && GENOMICS_DEMO_CONFIG="$CONFIG" python3 -c '
+from app.config import get_config
+cfg = get_config()
+for key, ds in cfg.datasets.items():
+    if ds.is_derived:
+        parent = cfg.dataset(ds.derived_from)
+        print("\t".join([key, parent.local, ds.derive_region or "", ds.local]))
+')" || die "could not build derived-dataset list from config.yaml"
 
 # -----------------------------------------------------------------------------
 # Free-space guard. Downloading 46 GB onto a full disk at 08:00 on show day is
@@ -223,7 +248,11 @@ verify_file() {
     ok "$base matches config.yaml sha256"
   fi
 
-  echo "$got_sha  $dest" >> "$CHECKSUM_FILE.tmp"
+  # Record the path relative to DATA_ROOT so the manifest stays valid if the
+  # data directory is moved (e.g. staged on the OS drive, then migrated to the
+  # U.2 NVMe). Absolute paths would silently verify the ORIGINAL files after a
+  # copy, which defeats the point of the check.
+  echo "$got_sha  ${dest#"$DATA_ROOT"/}" >> "$CHECKSUM_FILE.tmp"
 }
 
 # -----------------------------------------------------------------------------
@@ -279,7 +308,7 @@ print(f.get("base_url",""), f.get("r1",""), f.get("r2",""), f.get("local_dir","f
         || die "FASTQ download failed. GIAB rotates these filenames — check
      fastq.r1 / fastq.r2 in config.yaml against the current GIAB listing."
     fi
-    echo "$(sha256sum "$dest" | awk '{print $1}')  $dest" >> "$CHECKSUM_FILE.tmp"
+    echo "$(sha256sum "$dest" | awk '{print $1}')  ${dest#"$DATA_ROOT"/}" >> "$CHECKSUM_FILE.tmp"
   done
 fi
 
@@ -324,6 +353,58 @@ if (( BUILD_INDEX == 1 )); then
   say "${BLD}bwa-mem2 index${NC}"
   "$REPO_ROOT/scripts/build_index.sh" || die "bwa-mem2 index build failed"
 fi
+
+# -----------------------------------------------------------------------------
+# Derived datasets: built here by slicing a parent we have already verified.
+#
+# The pre-flight smoke BAM is derived rather than downloaded on purpose. The
+# obvious candidate -- DeepVariant's quickstart NA12878 BAM -- is aligned to
+# hg19, so against our GRCh38 reference every run dies with "0 bases found in
+# common among our input files". Slicing our own verified GRCh38 BAM keeps the
+# entire demo on one reference build.
+# -----------------------------------------------------------------------------
+if [[ -n "${DERIVED//[[:space:]]/}" ]]; then
+  echo
+  say "${BLD}Derived datasets${NC}"
+fi
+while IFS=$'\t' read -r key parent_local region local; do
+  [[ -z "${key:-}" ]] && continue
+  dest="$DATA_ROOT/$local"
+  parent="$DATA_ROOT/$parent_local"
+
+  if [[ -f "$dest" && -f "$dest.bai" ]]; then
+    ok "$(basename "$dest") already built"
+  elif [[ ! -f "$parent" ]]; then
+    warn "$key: parent $parent_local not staged — skipping"
+    continue
+  else
+    say "slicing $region out of $(basename "$parent")"
+    mkdir -p "$(dirname "$dest")"
+    if command -v samtools >/dev/null; then
+      samtools view -b -o "$dest.partial" "$parent" "$region" \
+        && mv "$dest.partial" "$dest" && samtools index "$dest" \
+        || die "failed to slice $key with samtools"
+    else
+      # samtools is not installed on the booth box, but the pipeline image
+      # ships one -- reuse it rather than adding a host dependency.
+      say "samtools not on PATH — using the one inside $ENGINE_IMAGE"
+      "${CONTAINER_CLI[@]}" run --rm -u "$(id -u):$(id -g)" \
+        -v "$DATA_ROOT:/d" --entrypoint /bin/bash "$ENGINE_IMAGE" -c "
+          set -e
+          export PATH=/opt/conda/envs/bio/bin:\$PATH
+          samtools view -b -o '/d/$local.partial' '/d/$parent_local' '$region'
+          mv '/d/$local.partial' '/d/$local'
+          samtools index '/d/$local'
+        " || die "failed to slice $key using the pipeline image.
+     Is Docker reachable? Try: ./scripts/preflight.sh"
+    fi
+    ok "built $(basename "$dest") from a sha256-verified parent"
+  fi
+
+  echo "$(sha256sum "$dest" | awk '{print $1}')  $local" >> "$CHECKSUM_FILE.tmp"
+  [[ -f "$dest.bai" ]] && \
+    echo "$(sha256sum "$dest.bai" | awk '{print $1}')  $local.bai" >> "$CHECKSUM_FILE.tmp"
+done <<< "$DERIVED"
 
 # -----------------------------------------------------------------------------
 # Publish checksums

@@ -4,10 +4,21 @@ A booth demo that runs **real germline variant calling (DeepVariant)** on an Int
 server and proves three things to a live audience:
 
 1. Deep-learning variant calling runs fast on standard Xeon CPUs using the processor's
-   **built-in accelerators (Intel AMX + AVX-512)** — no add-in cards.
-2. **AMX (BFloat16) measurably accelerates the workload** versus an AMX-off AVX-512 baseline.
+   **built-in vector units (AVX-512)** — no add-in cards, no GPU.
+2. **It scales across Xeon cores**: HG002 chr20 takes ~343 s on 16 cores and ~123 s on all
+   192 threads — a measured **2.8×** (2.78× and 2.86× on two separate races), with both
+   legs calling exactly the same 210,390 variants. Same arithmetic, more cores, no
+   trade-off.
 3. It does so on a **quiet, air-cooled, bench-deployable** server co-engineered by Intel and
    Kontron — deploy where the science happens, not in a loud data hall.
+
+> **About AMX.** This demo was originally designed around an AMX ON/OFF race. Measurement
+> killed that idea and we kept the measurement instead of the idea: stock DeepVariant 1.10
+> ships an **fp32** model, AMX has no fp32 path, and the tiles never execute a single
+> kernel (0 of 95 compute primitives). Forcing bf16 does engage AMX — and is ~1.6× *slower*
+> and produces genotype likelihoods DeepVariant itself rejects. The full evidence,
+> including how to reproduce it, is in **[docs/AMX-FINDINGS.md](docs/AMX-FINDINGS.md)**.
+> The AMX comparison is still in the app, as an evidence panel rather than a headline.
 
 ---
 
@@ -21,7 +32,12 @@ This demo shows real numbers or it shows nothing.
   out of the logs, and displays it. If the reported ISA contradicts the requested ceiling,
   the run is marked **failed** rather than reporting a number we can't stand behind.
 - A speedup is only ever shown when both legs succeeded **and** every parameter other than
-  the AMX state was identical (enforced by a run fingerprint comparison).
+  the single thing under test — the core budget, or the AMX state — was identical
+  (enforced by a run fingerprint comparison).
+- The app reports what oneDNN was **permitted** to use and what it **actually** used as two
+  separate facts. Counting AMX kernel dispatches is the only way to tell the difference
+  between "AMX was available" and "AMX did the work"; conflating them is exactly how this
+  project nearly shipped a 1.00× speedup as a headline.
 - Anything estimated — expected runtimes, TCO figures — is rendered in a visually distinct
   "Illustrative" style and labelled as an assumption.
 - Replay mode shows a permanent, unmistakable banner. Replays are recordings of real runs,
@@ -29,16 +45,26 @@ This demo shows real numbers or it shows nothing.
 
 ---
 
-## How the AMX toggle works (staff talking point)
+## How the scaling race works (staff talking point)
 
-> Intel AMX is a matrix-multiply engine built into every core of this Xeon. DeepVariant's
-> neural network runs through oneDNN, which picks the best instruction set available. We
-> flip a single environment variable — `ONEDNN_MAX_CPU_ISA` — to cap what oneDNN is allowed
-> to use. Set it to `AVX512_CORE_AMX` and the BF16 matrix tiles light up; set it to
-> `AVX512_CORE` and oneDNN falls back to plain AVX-512 vector maths. Same server, same data,
-> same core count, same container image — the only difference is whether the silicon that's
-> already in the CPU is switched on. That's the whole story: **the acceleration is already
-> inside the processor, you just have to turn it on.**
+> We run the same genome, the same container, the same binary and the same 192 shards
+> twice. The only thing we change is how many of this server's cores the job is allowed to
+> touch — 16 cores, then all 192 threads. Nothing else moves: same data, same instruction
+> set, same everything. Both runs call exactly the same 210,390 variants, so this isn't a
+> quality trade — it's the same work, finished sooner. That's the point of a server like
+> this: **the throughput is already in the box, and it scales.**
+
+### If a visitor asks about AMX (staff talking point)
+
+> Good question, and the honest answer is more interesting than a slide. AMX is a
+> matrix-multiply engine in every core of this Xeon, and it's genuinely fast — but it only
+> works on bf16 and int8. The public DeepVariant model is fp32, so oneDNN runs every
+> convolution on AVX-512 and the AMX tiles sit idle. We measured it: zero of ninety-five
+> compute operations touched AMX. We then forced the model into bf16, which *does* light up
+> the tiles — and it came out slower, and the accuracy dropped far enough that DeepVariant's
+> own validation rejected the output. So on this workload, today, the Xeon story is core
+> scaling and AVX-512. Give us a bf16-trained or int8-quantised model and AMX becomes the
+> story instead.
 
 Everything else is held constant by construction: both legs of a race are built from a single
 `RunSpec`, and the app compares a fingerprint of every shared parameter before it will report
@@ -159,9 +185,10 @@ Put the browser full screen (F11). Leave the **Status** tab up between visitors.
 
 1. **Status** — "96 cores, a terabyte of RAM, and the accelerators are already in the CPU."
 2. **Dataset** — pick *HG002 chr20*. "A real human chromosome at 35x depth."
-3. **AMX race** — press **RACE: AMX ON vs AMX OFF**.
-4. Watch AMX-OFF run first, then AMX-ON overtake it.
-5. **Speedup card** lands: "Built-in AMX = X.X× faster."
+3. **Scaling race** — press **RACE: 16 cores vs all 192 threads**.
+4. Watch the 16-core leg run first (~6 min), then the full machine overtake it (~2 min).
+5. **Speedup card** lands: "Xeon scales: all 192 threads vs 16 cores — ~2.8×", alongside the
+   variant counts proving both legs produced the same answer.
 6. **Results** — same variant counts either way. Speed without an accuracy trade.
 
 ### Resetting between visitors
@@ -226,7 +253,8 @@ demo_mode:
 
 **BAM-in (default).** Feeds a pre-aligned BAM straight to `run_deepvariant`. Fast enough for
 a live booth run. Uses `google/deepvariant:1.10.0`, which is pullable from Docker Hub and
-runs on TensorFlow/oneDNN — so it honours the AMX toggle.
+runs on TensorFlow/oneDNN — so it honours the AMX toggle (which, as documented in
+docs/AMX-FINDINGS.md, changes nothing measurable on the shipped fp32 model).
 
 **fq2vcf (optional).** The full Open-Omics pipeline: FASTQ → bwa-mem2 → sort → DeepVariant.
 Longer, best for the headline WGS story. The Intel-optimised images have no prebuilt Docker
@@ -264,7 +292,8 @@ app/
   config.py            config.yaml loader + validation
   sysinfo.py           real CPU / NUMA / RAM / Docker / acoustics probing
   preflight.py         green-red readiness checks + smoke test
-  runner.py            Docker orchestration and THE AMX TOGGLE
+  runner.py            Docker orchestration, core budget and ISA toggle
+  race.py              headless two-phase race (verify dispatch, then measure)
   parsing.py           stage progress, ISA verification, VCF counting
   replay.py            demo mode
   tco.py               efficiency panel maths (assumptions only)
@@ -310,7 +339,8 @@ docker load < deepvariant-image.tar.gz
 .venv/bin/python -m pytest tests/ -q
 ```
 
-The suite covers the guarantees that matter: that the AMX toggle changes nothing but the ISA,
+The suite covers the guarantees that matter: that the scaling race changes nothing but
+`--cpuset-cpus`, that the AMX toggle changes nothing but the ISA,
 that a speedup is refused when a comparison is invalid, that VCF counting is correct, and that
 ISA verification catches a mismatch.
 

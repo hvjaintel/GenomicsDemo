@@ -53,7 +53,10 @@ def record_trace(
 ) -> Path:
     """Persist a completed real run so it can be replayed later.
 
-    `legs` maps "amx_on"/"amx_off" to (log lines, result).
+    `legs` maps a leg key to (log lines, result). The keys come from whichever
+    race produced the run -- "full"/"limited" for a core-scaling race,
+    "amx-on"/"amx-off" for an AMX race -- so they are recorded verbatim rather
+    than forced into a fixed pair of names.
     """
     cfg.traces_dir.mkdir(parents=True, exist_ok=True)
     payload = {

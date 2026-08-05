@@ -58,7 +58,7 @@ def compute(
     else:
         wgs = next((s for s in cfg.samples if s.id == "wgs"), None)
         seconds_per_genome = float(
-            (wgs.runtime_estimate_amx_on_s if wgs else None) or 3600
+            (wgs.runtime_fast_s if wgs else None) or 3600
         )
         measured = False
 

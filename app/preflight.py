@@ -190,7 +190,12 @@ def _check_datasets(cfg: Config) -> list[Check]:
             continue
 
         note = "verified size" if dataset.size_bytes else "present"
-        if dataset.has_recorded_checksum:
+        if dataset.is_derived:
+            # A derived file has no upstream checksum by definition. Saying
+            # "sha256 not pinned" here would read as a gap when it is simply
+            # not applicable -- state the real provenance instead.
+            note = dataset.provenance
+        elif dataset.has_recorded_checksum:
             note += " · sha256 pinned in config"
         else:
             note += " · sha256 not yet pinned in config.yaml"
@@ -333,7 +338,26 @@ def smoke_test(cfg: Config, timeout_s: int = 900) -> tuple[bool, str]:
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m app.preflight",
+        description="Check the booth box is ready to run the demo.",
+    )
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="after the checks, run DeepVariant for real on the tiny smoke BAM",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=900,
+        help="seconds to allow the smoke run (default: 900)",
+    )
+    args = parser.parse_args(argv)
+
     cfg = Config.load()
     report = run_preflight(cfg)
     width = max(len(c.name) for c in report.checks) + 2
@@ -350,7 +374,19 @@ def main() -> int:
     print(f"  {report.summary}")
     print("=" * 78)
     print()
-    return 0 if report.ready else 1
+
+    if not args.smoke:
+        return 0 if report.ready else 1
+
+    if not report.ready:
+        print("Skipping smoke run — blocking issues above must be resolved first.")
+        return 1
+
+    print("Running DeepVariant for real on the smoke BAM. This is not a simulation.")
+    print("Expect a few minutes on first run.\n")
+    passed, detail = smoke_test(cfg, timeout_s=args.timeout)
+    print(f"{'✅' if passed else '❌'}  {detail}\n")
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

@@ -41,6 +41,68 @@ _ISA_PATTERNS = (
 # Percentage progress emitted by make_examples / call_variants sharding.
 _PERCENT = re.compile(r"(\d{1,3})%")
 
+# A single oneDNN primitive execution, e.g.
+#   onednn_verbose,primitive,exec,cpu,convolution,brgconv:avx512_core,...
+# Field 5 is the primitive kind, field 6 the implementation that was chosen.
+# The implementation name is the ONLY place oneDNN tells you whether the AMX
+# tiles were really used; the ISA banner merely reports what was permitted.
+_PRIMITIVE_EXEC = re.compile(
+    r"onednn_verbose,(?:primitive,)?exec,\w+,(?P<kind>[\w_]+),(?P<impl>[^,]*),",
+    re.IGNORECASE,
+)
+
+# Primitive kinds that carry the real neural-network arithmetic. Reorders and
+# the like are excluded: they are plumbing, and counting them would dilute the
+# "did AMX do the work?" signal.
+_COMPUTE_KINDS = {"convolution", "inner_product", "matmul", "deconvolution"}
+
+
+@dataclass
+class IsaUsage:
+    """What oneDNN ACTUALLY dispatched, as opposed to what it was allowed to.
+
+    The distinction matters enormously. On a fp32 model oneDNN happily reports
+    an AMX-capable ISA and then runs every convolution on AVX-512, because AMX
+    has no fp32 path. Reporting only the banner would let the demo claim "AMX
+    confirmed" while the AMX tiles sat idle for the entire run.
+    """
+
+    impl_counts: dict[str, int] = field(default_factory=dict)
+    compute_impl_counts: dict[str, int] = field(default_factory=dict)
+    compute_total: int = 0
+    compute_amx: int = 0
+
+    @property
+    def amx_used(self) -> bool:
+        return self.compute_amx > 0
+
+    @property
+    def amx_fraction(self) -> float:
+        if not self.compute_total:
+            return 0.0
+        return self.compute_amx / self.compute_total
+
+    @property
+    def top_impls(self) -> list[tuple[str, int]]:
+        """Busiest COMPUTE implementations. Reorders are excluded on purpose:
+        they are data shuffling, and listing them alongside convolutions makes
+        it look like AMX had work it declined."""
+        return sorted(self.compute_impl_counts.items(), key=lambda kv: -kv[1])[:4]
+
+    def summary(self) -> str:
+        if not self.compute_total:
+            return "no oneDNN compute primitives observed"
+        if not self.compute_amx:
+            names = ", ".join(f"{impl}×{n}" for impl, n in self.top_impls if impl)
+            return (
+                f"0 of {self.compute_total} compute primitives used AMX "
+                f"({names or 'implementation not reported'})"
+            )
+        return (
+            f"{self.compute_amx} of {self.compute_total} compute primitives "
+            f"used AMX ({self.amx_fraction:.0%})"
+        )
+
 
 @dataclass
 class StageProgress:
@@ -71,6 +133,7 @@ class LogParser:
         self.reported_isa: str | None = None
         self.current: str | None = None
         self.errors: list[str] = []
+        self.isa_usage = IsaUsage()
 
     def feed(self, line: str, timestamp: float) -> None:
         stripped = line.strip()
@@ -82,6 +145,19 @@ class LogParser:
             if match and not self.reported_isa:
                 self.reported_isa = match.group("isa").strip()
                 break
+
+        exec_match = _PRIMITIVE_EXEC.search(stripped)
+        if exec_match:
+            kind = exec_match.group("kind").lower()
+            impl = exec_match.group("impl").strip()
+            usage = self.isa_usage
+            usage.impl_counts[impl] = usage.impl_counts.get(impl, 0) + 1
+            if kind in _COMPUTE_KINDS:
+                usage.compute_total += 1
+                usage.compute_impl_counts[impl] = usage.compute_impl_counts.get(impl, 0) + 1
+                if "amx" in impl.lower():
+                    usage.compute_amx += 1
+            return  # verbose exec lines carry nothing else we need
 
         for name, pattern in _STAGE_PATTERNS.items():
             if not pattern.search(stripped):

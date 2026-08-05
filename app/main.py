@@ -4,7 +4,7 @@ Six screens, driven from config.yaml and real hardware:
   1 HOME / STATUS     — what this box is and what it can do
   2 DATASET PICKER    — what we are about to call variants on
   3 RUN CONSOLE       — one big button, live stages, streaming logs
-  4 AMX RACE          — AMX ON vs AMX OFF, the headline
+  4 SCALING RACE      — few cores vs the whole machine, the headline
   5 RESULTS           — real variant counts from the produced VCF
   6 EFFICIENCY / TCO  — clearly-labelled illustrative planning figures
 
@@ -24,6 +24,7 @@ from pathlib import Path
 import gradio as gr
 import pandas as pd
 
+from . import race as race_mod
 from . import replay as replay_mod
 from . import tco as tco_mod
 from .config import Config, get_config
@@ -163,8 +164,10 @@ def render_home(cfg: Config) -> str:
     <div class="metric-card">{numa_rows or '<span class="dim">not reported</span>'}</div>
   </div>
   <div style="margin-top: 22px;" class="dim">
-    No add-in accelerator cards. Everything above runs on the CPU's built-in
-    AMX and AVX-512 units — {escape(str(cfg.demo.get('partner_mark', '')))}.
+    No add-in accelerator cards. Everything runs on the CPU's built-in vector
+    units — AVX-512 for this workload; the AMX tiles are present and idle,
+    because DeepVariant's model is fp32 (docs/AMX-FINDINGS.md) —
+    {escape(str(cfg.demo.get('partner_mark', '')))}.
   </div>
 </div>
 """
@@ -233,14 +236,14 @@ def render_dataset(cfg: Config, sample_id: str | None) -> str:
             metric("Region", sample.regions or "whole genome", small=True),
             metric("Shards", f"{cfg.num_shards}", note="one per hardware thread"),
             metric(
-                "Expected AMX ON",
-                fmt_duration(sample.runtime_estimate_amx_on_s),
-                note="estimate — for pacing only" if sample.illustrative else "measured",
+                f"Expected — {cfg.scaling.get('full_label', 'all cores')}",
+                fmt_duration(sample.runtime_fast_s),
+                note="estimate — for pacing only" if sample.illustrative else "measured on this box",
             ),
             metric(
-                "Expected AMX OFF",
-                fmt_duration(sample.runtime_estimate_amx_off_s),
-                note="estimate — for pacing only" if sample.illustrative else "measured",
+                f"Expected — {cfg.scaling.get('baseline_label', 'reduced cores')}",
+                fmt_duration(sample.runtime_slow_s),
+                note="estimate — for pacing only" if sample.illustrative else "measured on this box",
             ),
         ]
     )
@@ -287,23 +290,65 @@ def _stages_html(stages: dict[str, dict]) -> str:
     )
 
 
-def _isa_html(cfg: Config, requested: str, reported: str | None, verified: bool | None) -> str:
+def _isa_html(
+    cfg: Config,
+    requested: str,
+    reported: str | None,
+    verified: bool | None,
+    usage: str = "",
+    amx_primitives: int = 0,
+    compute_primitives: int = 0,
+) -> str:
+    """The instruction-set card.
+
+    Two separate facts, deliberately kept apart:
+
+      * what oneDNN was ALLOWED to use (the requested ceiling and the banner it
+        printed back), and
+      * what it ACTUALLY used (how many compute primitives ran on AMX kernels).
+
+    Conflating them is how a demo ends up claiming an AMX win it never earned:
+    the banner reports the CPU's capability, and on an fp32 model it will
+    happily say "Intel AMX with bfloat16 support" while every convolution runs
+    on AVX-512. See docs/AMX-FINDINGS.md.
+    """
     if reported is None:
         badge = pill("ISA not reported by oneDNN", "warn")
     elif verified is True:
-        badge = pill("ISA verified", "on")
+        badge = pill("ceiling verified", "on")
     elif verified is False:
         badge = pill("ISA MISMATCH", "bad")
     else:
-        badge = pill("ISA unverified", "warn")
+        badge = pill("ceiling unverified", "warn")
+
+    if not compute_primitives:
+        usage_badge = pill("AMX usage not instrumented this run", "warn")
+        usage_note = (
+            "oneDNN verbose logging was off, so which kernels ran was not "
+            "recorded. Timing runs keep it off on purpose — it costs more on "
+            "some code paths than others and would skew the comparison."
+        )
+    elif amx_primitives:
+        usage_badge = pill(f"AMX used by {amx_primitives}/{compute_primitives} primitives", "on")
+        usage_note = escape(usage)
+    else:
+        usage_badge = pill("AMX permitted but never used", "warn")
+        usage_note = (
+            "DeepVariant's shipped model is fp32 and AMX has no fp32 path, so "
+            "the tiles had nothing to do. Expected — see docs/AMX-FINDINGS.md."
+        )
+
     return (
         f'<div class="metric-card">'
-        f'<div class="metric-label">Instruction set</div>'
+        f'<div class="metric-label">Instruction set — permitted</div>'
         f'<div class="mono" style="font-size:1.05rem;">requested ceiling: '
         f'<strong>{escape(requested)}</strong></div>'
         f'<div class="mono dim" style="font-size:1rem; margin-top:6px;">oneDNN reported: '
         f'{escape(reported or "—")}</div>'
-        f'<div style="margin-top:10px;">{badge}</div></div>'
+        f'<div style="margin-top:10px;">{badge}</div>'
+        f'<div class="metric-label" style="margin-top:18px;">Instruction set — actually used</div>'
+        f'<div style="margin-top:8px;">{usage_badge}</div>'
+        f'<div class="metric-note">{usage_note}</div></div>'
     )
 
 
@@ -410,18 +455,26 @@ def _run_summary(cfg: Config, result: RunResult, reported_isa: str | None, repla
     return (
         metric_grid(cards)
         + '<div style="margin-top:16px;">'
-        + _isa_html(cfg, result.requested_isa, reported_isa or result.reported_isa, result.isa_verified)
+        + _isa_html(
+            cfg,
+            result.requested_isa,
+            reported_isa or result.reported_isa,
+            result.isa_verified,
+            result.isa_impl_summary,
+            result.amx_primitives,
+            result.compute_primitives,
+        )
         + "</div>"
     )
 
 
 # =============================================================================
-# Panel 4 — AMX RACE
+# Panel 4 — SCALING RACE
 # =============================================================================
 
 
 def run_race(cfg: Config, sample_id: str) -> Iterator[tuple]:
-    """Run AMX-OFF then AMX-ON on identical inputs and race them on screen.
+    """Run the reduced-core leg then the full-machine leg, racing them on screen.
 
     Sequential rather than concurrent: two simultaneous 192-shard runs would
     contend for the same cores and neither number would mean anything.
@@ -435,8 +488,8 @@ def run_race(cfg: Config, sample_id: str) -> Iterator[tuple]:
     STATE.replaying = use_replay
 
     sample = cfg.sample(sample_id)
-    est_off = sample.runtime_estimate_amx_off_s or 300
-    est_on = sample.runtime_estimate_amx_on_s or 120
+    est_off = sample.runtime_slow_s or 300
+    est_on = sample.runtime_fast_s or 120
 
     spec = None
     if not use_replay:
@@ -451,9 +504,27 @@ def run_race(cfg: Config, sample_id: str) -> Iterator[tuple]:
             )
             return
 
+    # The race varies exactly one thing: the core budget. `True` is the
+    # full-machine leg, `False` the reduced-core baseline. It is NOT an AMX
+    # race -- AMX is held constant across both legs, because on stock
+    # DeepVariant the tiles never run a kernel at all (docs/AMX-FINDINGS.md).
+    full_leg, baseline_leg = race_mod.build_legs(cfg, spec, "scaling") if spec else (None, None)
+
     results: dict[bool, RunResult] = {}
     elapsed: dict[bool, float] = {False: 0.0, True: 0.0}
     finished: dict[bool, bool] = {False: False, True: False}
+
+    def leg_for(full: bool):
+        return full_leg if full else baseline_leg
+
+    def leg_label(full: bool) -> str:
+        leg = leg_for(full)
+        if leg:
+            return leg.label
+        return cfg.scaling.get(
+            "full_label" if full else "baseline_label",
+            "all cores" if full else "reduced cores",
+        )
 
     def lanes_html() -> str:
         html = []
@@ -474,7 +545,7 @@ def run_race(cfg: Config, sample_id: str) -> Iterator[tuple]:
                 meta.append("waiting")
             html.append(
                 race_lane(
-                    cfg.amx_label(amx_on),
+                    leg_label(amx_on),
                     amx_on,
                     fmt_duration(secs) if secs else "—",
                     pct,
@@ -485,19 +556,22 @@ def run_race(cfg: Config, sample_id: str) -> Iterator[tuple]:
 
     yield lanes_html(), "", ""
 
-    # AMX OFF first so the audience watches the baseline finish, then sees AMX
-    # beat it — the reveal lands better in that order.
+    # Baseline first so the audience watches the slow leg finish, then sees the
+    # full machine beat it — the reveal lands better in that order.
     for amx_on in (False, True):
+        leg = leg_for(amx_on)
         if use_replay:
             trace = replay_mod.default_trace(cfg)
-            events = replay_mod.replay(trace, "amx_on" if amx_on else "amx_off")
+            events = replay_mod.replay(trace, leg.key if leg else ("full" if amx_on else "limited"))
         else:
-            events = runner.run(spec, amx_on=amx_on)
+            events = runner.run(
+                leg.spec, amx_on=leg.amx_on, leg_id=leg.key, verbose_isa=False
+            )
 
         last_emit = 0.0
         for event in events:
             if event.kind == "log":
-                STATE.record_log("race", f"[{'ON ' if amx_on else 'OFF'}] {event.line}")
+                STATE.record_log("race", f"[{leg_label(amx_on)}] {event.line}")
                 elapsed[amx_on] = event.elapsed_s
                 now = time.time()
                 if now - last_emit > 0.3:
@@ -529,8 +603,11 @@ def _race_verdict(
             '<div class="metric-note">Both legs must finish before a speedup can be reported.</div></div>'
         )
 
+    fast_label = cfg.scaling.get("full_label", "all cores")
+    slow_label = cfg.scaling.get("baseline_label", "reduced cores")
+
     if not on.succeeded or not off.succeeded:
-        failed = "AMX ON" if not on.succeeded else "AMX OFF"
+        failed = fast_label if not on.succeeded else slow_label
         error = (on if not on.succeeded else off).error or "unknown error"
         return (
             f'<div class="metric-card">{pill(f"{failed} leg failed", "bad")}'
@@ -543,7 +620,8 @@ def _race_verdict(
         return (
             f'<div class="metric-card">{pill("Comparison invalid", "bad")}'
             '<div class="metric-note">The two runs did not use identical parameters, '
-            'so the difference cannot be attributed to AMX. No speedup reported.</div></div>'
+            'so the difference cannot be attributed to the core budget. '
+            'No speedup reported.</div></div>'
         )
 
     sample = cfg.sample(sample_id)
@@ -565,25 +643,28 @@ def _race_verdict(
             kind = "on" if delta < 0.5 else "warn"
             variance_note = (
                 f'<div style="margin-top:14px;">{pill(f"Variant counts differ by {delta:.2f}%", kind)}'
-                f'<span class="dim" style="margin-left:12px;">AMX ON {a:,} · AMX OFF {b:,}</span></div>'
+                f'<span class="dim" style="margin-left:12px;">'
+                f'{escape(fast_label)} {a:,} · {escape(slow_label)} {b:,}</span></div>'
             )
 
     cards = [
-        metric("AMX ON", fmt_duration(on.wall_clock_s), note=on.requested_isa),
-        metric("AMX OFF", fmt_duration(off.wall_clock_s), note=off.requested_isa),
+        metric(fast_label, fmt_duration(on.wall_clock_s), note="full machine"),
+        metric(slow_label, fmt_duration(off.wall_clock_s),
+               note=f"--cpuset-cpus {cfg.scaling.get('baseline_cpuset', '')}"),
         metric("Time saved", fmt_duration((off.wall_clock_s or 0) - (on.wall_clock_s or 0))),
     ]
     if tput_on and tput_off:
-        cards.append(metric("Throughput AMX ON", f"{tput_on:,.0f}", unit="Mb/h"))
-        cards.append(metric("Throughput AMX OFF", f"{tput_off:,.0f}", unit="Mb/h"))
+        cards.append(metric(f"Throughput — {fast_label}", f"{tput_on:,.0f}", unit="Mb/h"))
+        cards.append(metric(f"Throughput — {slow_label}", f"{tput_off:,.0f}", unit="Mb/h"))
 
     source = "recorded run" if replaying else "measured live on this server"
     return (
         speedup_card(
             multiplier,
-            "Built-in AMX is faster",
-            f"{source} · identical BAM, reference, shard count and NUMA policy · "
-            f"only ONEDNN_MAX_CPU_ISA differed",
+            f"Xeon scales: {fast_label} vs {slow_label}",
+            f"{source} · identical BAM, reference, shard count, NUMA policy and ISA "
+            f"settings · only the core budget differed, and both legs called the "
+            f"same variants",
         )
         + '<div style="margin-top:18px;">'
         + metric_grid(cards)
@@ -604,7 +685,7 @@ def render_results(cfg: Config) -> tuple[str, pd.DataFrame]:
     if result is None or not result.succeeded:
         return (
             '<div class="metric-card"><div class="metric-label">No results yet</div>'
-            '<div class="metric-note">Run the pipeline from the Run Console or the AMX Race view. '
+            '<div class="metric-note">Run the pipeline from the Run Console or the Scaling Race view. '
             "Nothing is shown here until a real run has produced a VCF.</div></div>",
             empty,
         )
@@ -650,24 +731,27 @@ def _concordance_note(cfg: Config) -> str:
     if on and off and on.succeeded and off.succeeded and on.variant_counts and off.variant_counts:
         a, b = on.variant_counts.total, off.variant_counts.total
         delta = abs(a - b) / max(a, b, 1) * 100.0
+        fast_label = cfg.scaling.get("full_label", "all cores")
+        slow_label = cfg.scaling.get("baseline_label", "reduced cores")
         verdict = (
-            "AMX ON and AMX OFF produced effectively identical call sets — "
-            "the speedup does not come at the cost of accuracy."
+            "Both legs produced effectively identical call sets — the speedup "
+            "costs nothing in accuracy. It is the same arithmetic, spread over "
+            "more cores."
             if delta < 0.5
-            else "AMX ON and AMX OFF call sets differ by more than 0.5% — investigate before quoting the speedup."
+            else "The two legs' call sets differ by more than 0.5% — investigate before quoting the speedup."
         )
         body = (
             f'<div class="metric-card" style="margin-top:16px;">'
             f'<div class="metric-label">Accuracy check — measured</div>'
-            f'<div style="font-size:1.15rem;">AMX ON: <strong>{a:,}</strong> variants · '
-            f'AMX OFF: <strong>{b:,}</strong> variants · difference <strong>{delta:.2f}%</strong></div>'
+            f'<div style="font-size:1.15rem;">{escape(fast_label)}: <strong>{a:,}</strong> variants · '
+            f'{escape(slow_label)}: <strong>{b:,}</strong> variants · difference <strong>{delta:.2f}%</strong></div>'
             f'<div class="metric-note">{escape(verdict)}</div></div>'
         )
     else:
         body = (
             '<div class="metric-card" style="margin-top:16px;">'
             '<div class="metric-label">Accuracy check</div>'
-            '<div class="metric-note">Run the AMX Race to compare the AMX-ON and AMX-OFF '
+            '<div class="metric-note">Run the Scaling Race to compare the two legs\' '
             "call sets directly. Until then no accuracy claim is made.</div></div>"
         )
 
@@ -842,13 +926,18 @@ def build_app(cfg: Config) -> gr.Blocks:
                 )
 
             # ---------------- AMX RACE ----------------
-            with gr.Tab("AMX race"):
+            with gr.Tab("Scaling race"):
                 gr.HTML(
                     '<div class="dim" style="font-size:1.1rem; margin-bottom:14px;">'
-                    "Two runs, back to back, on the same data with the same settings. "
-                    "The only difference is the oneDNN instruction-set ceiling: "
-                    "<span class='mono'>AVX512_CORE_AMX</span> versus "
-                    "<span class='mono'>AVX512_CORE</span>.</div>"
+                    "Two runs, back to back, on the same data with the same binary, "
+                    "shard count and instruction-set settings. The only difference is "
+                    "how many cores the container may use: "
+                    f"<span class='mono'>{escape(str(cfg.scaling.get('full_label', 'all cores')))}</span> versus "
+                    f"<span class='mono'>{escape(str(cfg.scaling.get('baseline_label', 'reduced cores')))}</span> "
+                    "(<span class='mono'>--cpuset-cpus "
+                    f"{escape(str(cfg.scaling.get('baseline_cpuset', '')))}</span>). "
+                    "Both legs call the same variants — nothing is traded for the speed. "
+                    "Why this is not an AMX race: see docs/AMX-FINDINGS.md.</div>"
                 )
                 race_sample = gr.Radio(
                     choices=sample_choices(cfg),
@@ -856,7 +945,8 @@ def build_app(cfg: Config) -> gr.Blocks:
                     label="Sample",
                 )
                 race_btn = gr.Button(
-                    "▶  RACE: AMX ON vs AMX OFF",
+                    f"▶  RACE: {cfg.scaling.get('baseline_label', 'few cores')} "
+                    f"vs {cfg.scaling.get('full_label', 'all cores')}",
                     variant="primary",
                     elem_classes="start-button",
                 )

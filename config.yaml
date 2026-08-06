@@ -53,9 +53,17 @@ engines:
     default: true
 
   # Intel Open-Omics optimised DeepVariant. Must be BUILT locally from the
-  # IntelLabs Dockerfile — there is no prebuilt image on Docker Hub. Surfaces
-  # the BF16 quantised call_variants module (~2.7x faster call-variant) and the
-  # parallel multi-process post-process module.
+  # IntelLabs Dockerfile — there is no prebuilt image on Docker Hub.
+  #
+  # A "~2.7x faster call_variants" claim used to sit in this comment. It came
+  # from the project brief, not from a measurement, and it is NOT supported by
+  # anything we have run. Measured on this box, stock DeepVariant 1.5.0 with
+  # the same bf16/AMX rewrite Open-Omics applies: call_variants 284.2 s -> 
+  # 240.1 s on HG002 chr20. That is 1.18x, not 2.7x.
+  #
+  # Open-Omics also parallelises postprocess_variants and raises the batch
+  # size, so the full fork may beat 1.18x — but until it is built and timed
+  # here, no multiplier belongs in this file. See docs/AMX-FINDINGS.md.
   open_omics_bams2vcf:
     label: "Open-Omics DeepVariant (Intel optimised, BAM-in)"
     image: "open-omics/bams2vcf:r1.5"

@@ -318,3 +318,83 @@ Not attempted in this repo, listed so the question has an answer:
   they are not directly comparable to anything above.
 - A larger batch or a larger model, where tile utilisation can amortise the
   reorder cost.
+
+---
+
+# Appendix — assessing third-party pipeline numbers
+
+A figure of **22.57 minutes** for "full workload end-to-end (fq2bam and
+DeepVariant v1.5)" was put to this project. It cannot be reconciled with
+anything measured here, and the reasons are worth writing down, because the
+same traps apply to any vendor number a booth visitor quotes at you.
+
+## Reference points, all verifiable
+
+Google's own DeepVariant metrics, whole genome, all chromosomes:
+
+| Version | Machine | make_examples | call_variants | postprocess | Total |
+| --- | --- | --- | --- | --- | --- |
+| 1.5 | 64 vCPU GCP | ~103 min | ~185 min | ~48 min | **~336 min** |
+| 1.10 | n2-standard-96 | 46m 15s | 15m 58s | 6m 45s | **~69 min** |
+
+Source: `github.com/google/deepvariant/blob/r1.5/docs/metrics.md` and `.../r1.10/docs/metrics.md`.
+Note the same version effect measured here on chr20: 1.10's `call_variants` is
+~11.6x faster than 1.5's, because of the small-model fast path.
+
+Intel Labs' own published scaling for the Open-Omics `fq2vcf` pipeline
+(bwa-mem2 + their DeepVariant 1.5 fork), quoted verbatim from
+`community.intel.com/t5/Blogs/Tech-Innovation/Artificial-Intelligence-AI/Intel-Xeon-is-all-you-need-for-AI-inference-Performance/post/1506083`:
+
+> "Open Omics consumes just 109 mins on a single socket of the Intel CPU.
+> Moreover, it consumes just 8.5 mins on 8 dual-socket Intel CPUs (16 sockets),
+> which is nearly 1.9 times faster than a DGX A100 GPU system with 8 A100 GPUs.
+> On further scaling to 32 dual-socket Intel CPUs (64 sockets), Open Omics
+> consumes just 3 mins."
+
+Hardware footnote, verbatim: *"1-node (1,2 socket), 2/4/8/16/32-nodes
+(4/8/16/32/64 sockets), Each socket is 1x Intel Xeon Platinum 8480+, 56 cores"*.
+Dataset: **HG001, 30x** — not HG002 at 35x.
+
+NVIDIA Clara Parabricks, from `developer.nvidia.com/blog/long-read-sequencing-workflows-and-higher-throughputs-in-nvidia-parabricks-4-1/`:
+
+> "a 30x whole genome in 16 mins on a DGX A100 GPU [8xA100 GPUs] compared to
+> 21 mins in v4.0 and ~24 hours on CPU-only."
+
+## Why 22.57 min is not a single-server number
+
+**1. Intel's own single-socket figure is 109 minutes.** Their pipeline reaches
+single-digit minutes only by scaling out over MPI to 8-32 dual-socket *nodes*.
+22.57 min sits between their 1-socket and 16-socket points — implying roughly
+2-3 dual-socket nodes. This booth has one. A cluster number is not a server
+number.
+
+**2. `fq2bam` is NVIDIA's tool, not Intel's.** Parabricks' `fq2bam` is
+GPU-only ("A 30x whole genome can be run through FQ2BAM in as little as 6
+minutes on an NVIDIA DGX system"). Intel's container is `fq2bams` — plural —
+and is bwa-mem2 + samtools sort, no CUDA anywhere in its Dockerfile. If the
+figure genuinely refers to `fq2bam`, part of it ran on GPUs. Note also that
+Parabricks v4.0 was **21 min** on a DGX A100, which is uncomfortably close to
+22.57.
+
+**3. The scope differs.** Parabricks `fq2bam` includes duplicate marking and
+BQSR. Intel's `fq2bams` includes neither. Two pipelines with different work in
+them cannot be compared on wall clock alone.
+
+**4. Arithmetic.** Scaling this project's measured chr20 v1.5 numbers to a
+whole genome puts DeepVariant alone — before any alignment — at roughly
+**3.8-4.5 hours** on this 192-thread server, consistent with Google's own
+336-minute figure on 64 vCPUs. Reaching 22.57 min including alignment on one
+node would require `call_variants` to scale linearly across 192 threads (it
+does not; it is memory-bandwidth bound), an int8 model (none is published),
+and sub-3-minute bwa-mem2 alignment (realistically 15-25 min).
+
+## The point
+
+None of this makes the Intel number false. Their 8.5 min on 16 sockets is
+almost certainly real, and it is a genuinely impressive result *for a cluster*.
+The failure mode is comparing it to one server, or to a BAM-in run, or to a
+pipeline that also marks duplicates.
+
+Before repeating any third-party figure at the booth, get four things:
+**node count, tool identity, dataset coverage, and stage scope.** Without all
+four the number is not comparable to anything this demo shows.

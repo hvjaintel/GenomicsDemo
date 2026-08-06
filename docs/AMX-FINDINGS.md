@@ -9,8 +9,20 @@ Everything below was produced on the demo machine itself. No number here is
 estimated, scaled, or borrowed from a vendor slide.
 
 **Hardware:** Intel Xeon 6740P, dual socket, 192 logical CPUs, 1 TB RAM.
-**Software:** `google/deepvariant:1.10.0`, oneDNN as shipped in that image.
+**Software:** `google/deepvariant:1.10.0` **and** `google/deepvariant:1.5.0`.
 **Data:** HG002 chr20, GRCh38, 192 shards, `run_deepvariant` BAM-in path.
+
+> ### Read this first: the version is the whole story
+>
+> **AMX works on DeepVariant 1.5 and does not work on 1.10.** This is not a
+> tuning difference, it is an architectural one. 1.5 runs a TF1 static graph;
+> 1.6 migrated to TF2/Keras SavedModel. The bf16 graph rewrite that engages
+> AMX is safe on the former and breaks correctness on the latter.
+>
+> And the twist that matters commercially: **stock 1.10 without AMX is still
+> 2.5x faster than 1.5 with AMX.** Findings 1-3 below are the 1.10 story;
+> Finding 4 is the 1.5 story; Finding 5 is the comparison that decides which
+> one you should actually deploy.
 
 ---
 
@@ -151,6 +163,103 @@ erroring, which is its own small trap.
    Not timed.
 2. **Measure** — the real region with verbose off. Timed.
 
+## Finding 4 — On DeepVariant 1.5, AMX works properly, via a supported flag
+
+Intel's Open-Omics-DeepVariant fork is based on **v1.5**, not 1.10. That single
+fact explains everything above.
+
+v1.5 uses TensorFlow 2.11 in **TF1 compatibility mode**: `call_variants.py`
+calls `tf.compat.v1.disable_eager_execution()`, loads a TF1 checkpoint
+(`model.ckpt.meta` / `.index` / `.data`), and runs inference through an
+estimator with a `tf.compat.v1.ConfigProto`. DeepVariant 1.6 replaced all of
+that with TF2/Keras and a `saved_model.pb`.
+
+Intel's fork changes exactly one thing in `call_variants.py`: it builds that
+ConfigProto with a bf16 rewrite enabled.
+
+```python
+# IntelLabs/open-omics-deepvariant, r1.5, deepvariant/call_variants.py
+info = cpuinfo.get_cpu_info()
+if 'amx_bf16' in info['flags']:
+    graph_options = tf.compat.v1.GraphOptions(
+        rewrite_options=rewriter_config_pb2.RewriterConfig(
+            auto_mixed_precision_onednn_bfloat16=rewriter_config_pb2.RewriterConfig.ON))
+    config = tf.compat.v1.ConfigProto(graph_options=graph_options)
+```
+
+**You do not need their fork, and you do not need to build anything.** Stock
+`google/deepvariant:1.5.0` already exposes a `--config_string` flag that is
+`text_format.Parse`d straight into that same ConfigProto:
+
+```bash
+--call_variants_extra_args="config_string='graph_options: {rewrite_options: {auto_mixed_precision_onednn_bfloat16: ON}}'"
+```
+
+Measured on the stock 1.5.0 image with that flag:
+
+```
+108 convolution    brgconv:avx512_core_amx_bf16
+ 82 convolution brgconv_1x1:avx512_core_amx_bf16
+```
+
+**Every convolution on AMX. Zero `round_gls` failures.** The TF1 Grappler pass
+operates on the full static graph and keeps the final softmax in fp32, so the
+genotype likelihoods still sum to 1.0. That is precisely what the TF2 path
+fails to guarantee.
+
+Full chr20, 192 shards, verbose logging off:
+
+| Stage | fp32 | bf16 + AMX | |
+| --- | --- | --- | --- |
+| make_examples | 47.5 s | 48.9 s | unchanged, as expected |
+| **call_variants** | **284.2 s** | **240.1 s** | **1.18x** |
+| postprocess_variants | 24.4 s | 23.1 s | unchanged |
+| **End to end** | **358 s** | **314 s** | **1.14x** |
+
+Variants called: **215,899 in both legs — identical.** No accuracy trade at
+the call-set level.
+
+So AMX is real, it is correct, and on this workload it is worth about **18% on
+the inference stage and 14% end to end**. That is a genuine result. It is also
+a long way from the order-of-magnitude figures AMX is usually marketed with,
+because `call_variants` is only part of the pipeline and the model is small.
+
+### A note on Intel's published numbers
+
+The Open-Omics-DeepVariant README claims "up to **YYx** speedup" — a literal
+unfilled placeholder, still present on the `r1.5` branch. There is no published
+benchmark figure in the repository, and no prebuilt Intel-optimized DeepVariant
+image exists on any public registry. Intel's pipeline benchmarks that do
+circulate measure **fq2vcf end to end**, including bwa-mem2 alignment, on
+whole-genome data — so they are not comparable to a `call_variants` number, and
+a large part of any such figure is core count rather than AMX.
+
+## Finding 5 — the version costs more than AMX gains
+
+The decisive measurement. Same box, same chr20 BAM, same 192 shards:
+
+| Configuration | End to end | call_variants | Variants |
+| --- | --- | --- | --- |
+| 1.5.0, fp32 | 358 s | 284.2 s | 215,899 |
+| 1.5.0, bf16 + AMX | 314 s | 240.1 s | 215,899 |
+| **1.10.0, fp32, AMX idle** | **123 s** | **~40 s** | 210,390 |
+
+**Stock 1.10 with the AMX tiles doing nothing is 2.5x faster end to end than
+1.5 with AMX fully engaged — and roughly 6x faster on the inference stage
+itself.** DeepVariant 1.10 routes easy candidates through a small model that
+never touches the CNN, which saves far more work than accelerating the CNN
+does.
+
+This is the uncomfortable, useful conclusion: **on this workload, staying
+current beats turning on AMX, by a wide margin.** Choosing 1.5 to obtain a
+1.14x AMX win costs you a 2.9x version win. If a comparison is framed as
+"AMX on versus AMX off" on a pinned old version, it is answering a question
+nobody deploying this pipeline should be asking.
+
+(The variant counts differ between 1.5 and 1.10 — 215,899 vs 210,390 — because
+they are different models and different callers. That is a version difference,
+not an AMX effect: within each version the two legs agree exactly.)
+
 ## What the demo does instead
 
 The booth headline is a **core-scaling race**: identical binary, identical
@@ -172,6 +281,13 @@ manufactured number.
 ## Reproducing this
 
 ```bash
+# Finding 4: AMX genuinely working, on stock DeepVariant 1.5.0, no fork needed
+docker run --rm -e ONEDNN_MAX_CPU_ISA=AVX512_CORE_AMX -e ONEDNN_VERBOSE=1 \
+  ... google/deepvariant:1.5.0 /opt/deepvariant/bin/run_deepvariant \
+  --model_type=WGS ... \
+  --call_variants_extra_args="config_string='graph_options: {rewrite_options: {auto_mixed_precision_onednn_bfloat16: ON}}'"
+# expect: brgconv:avx512_core_amx_bf16, and no round_gls ValueError
+
 # The honest headline
 python -m app.race --mode scaling --sample chr20
 
@@ -188,6 +304,10 @@ python -m app.race --mode amx --sample chr20
 
 Not attempted in this repo, listed so the question has an answer:
 
+- **On 1.10 specifically:** a TF2 path that honours the Keras classification
+  head's `dtype=tf.float32` annotation end to end. The 1.5 result proves the
+  bf16 rewrite is sound in principle — it is the TF2 SavedModel plumbing that
+  loses the fp32 output contract.
 - A model **trained or fine-tuned in bf16**, so no cast boundaries are needed
   and the softmax stays inside tolerance.
 - **int8 post-training quantization** with calibration, which AMX also

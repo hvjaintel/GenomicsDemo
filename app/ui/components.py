@@ -55,6 +55,42 @@ def stage_bar(label: str, percent: float, done: bool, duration_s: float | None) 
     )
 
 
+DNA_STATES = ("idle", "running", "quiet", "done", "failed")
+
+
+def dna_helix(state: str, caption: str, pairs: int = 24) -> str:
+    """A turning double helix that reports whether the pipeline is alive.
+
+    This is deliberately *not* a progress bar. Progress is already shown by the
+    stage bars, which are driven by parsed DeepVariant output; a spinner that
+    invented its own notion of "how far along" would be exactly the kind of
+    decoration this demo exists to argue against. What the helix shows is one
+    real fact: whether the container is still emitting output. It turns while
+    log lines arrive and stops when they stop, so a wedged run looks wedged on
+    the booth screen instead of looking busy.
+
+    The animation is pure CSS on static markup. Nothing here is driven by a
+    timer on the Python side, because the caller re-renders the console several
+    times a second and any JavaScript-driven state would be thrown away with
+    each replacement of the DOM node.
+    """
+    if state not in DNA_STATES:
+        raise ValueError(f"unknown helix state {state!r}; expected one of {DNA_STATES}")
+
+    rungs = "".join(
+        f'<span class="dna-pair" style="--i:{i}">'
+        f'<i class="dna-rung"></i><i class="dna-node a"></i><i class="dna-node b"></i>'
+        f"</span>"
+        for i in range(pairs)
+    )
+    return (
+        f'<div class="dna-panel {state}">'
+        f'<div class="dna-helix" aria-hidden="true">{rungs}</div>'
+        f'<div class="dna-caption" role="status">{escape(caption)}</div>'
+        f"</div>"
+    )
+
+
 def race_lane(
     label: str,
     on: bool,

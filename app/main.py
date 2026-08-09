@@ -40,6 +40,7 @@ from .runner import (
 from .sysinfo import snapshot
 from .theme import build_css, build_theme
 from .ui.components import (
+    dna_helix,
     fmt_bytes,
     fmt_duration,
     illustrative,
@@ -357,8 +358,47 @@ def _live_possible(cfg: Config) -> bool:
     return report.ready
 
 
+# How long the log may stay silent before the helix stops turning. DeepVariant
+# is chatty during make_examples but can go quiet mid-batch in call_variants, so
+# this is set well above normal gaps: the aim is to catch a wedged container,
+# not to flicker during ordinary work.
+QUIET_AFTER_S = 25.0
+
+DNA_IDLE_CAPTION = (
+    "Idle. The helix turns while the pipeline is producing output — "
+    "it shows liveness, not progress. Progress is the stage bars above."
+)
+
+# Deliberately free of anything that changes during a run. Gradio replaces the
+# element's HTML whenever the value differs, and a replaced node restarts its
+# CSS animation from the first keyframe; folding the elapsed time in here would
+# reset the helix four times a second. Elapsed time is on the header pill.
+DNA_RUNNING_CAPTION = (
+    "Running. The helix turns while DeepVariant is producing output. "
+    "It is a liveness indicator, not a progress bar."
+)
+
+
+def _dna_caption_quiet(silent_s: float) -> str:
+    return (
+        f"No output for {fmt_duration(silent_s)}, so the helix has stopped. "
+        "The run has not been cancelled — DeepVariant can fall silent inside a "
+        "long call_variants batch — but nothing is being reported right now."
+    )
+
+
 def run_console(cfg: Config, sample_id: str, amx_on: bool) -> Iterator[tuple]:
-    """Generator driving the Run Console. Yields (header, stages, logs, summary)."""
+    """Generator driving the Run Console.
+
+    Yields (header, dna, stages, logs, summary).
+
+    The helix is yielded as ``gr.skip()`` whenever its markup has not changed.
+    That is not an optimisation — it is required for the animation to work at
+    all. Gradio replaces the element's HTML on every update, and a replaced node
+    restarts its CSS animation from the first keyframe, so re-sending identical
+    markup four times a second would leave the helix twitching in place instead
+    of turning.
+    """
     runner = DeepVariantRunner(cfg)
     runner.reset_cancel()
     key = "console"
@@ -371,8 +411,19 @@ def run_console(cfg: Config, sample_id: str, amx_on: bool) -> Iterator[tuple]:
     banner = replay_banner(replay_mod.banner_text(cfg)) if use_replay else ""
     STATE.replaying = use_replay
 
+    last_dna = ""
+
+    def dna(state: str, caption: str):
+        """Emit the helix only when it actually changes; otherwise skip."""
+        nonlocal last_dna
+        html = dna_helix(state, caption)
+        if html == last_dna:
+            return gr.skip()
+        last_dna = html
+        return html
+
     header = f'{banner}<div style="margin-bottom:12px;">{amx_pill} {pill(isa, "")}</div>'
-    yield header, _stages_html({}), "", ""
+    yield header, dna("running", DNA_RUNNING_CAPTION), _stages_html({}), "", ""
 
     if use_replay:
         trace = replay_mod.default_trace(cfg)
@@ -383,6 +434,7 @@ def run_console(cfg: Config, sample_id: str, amx_on: bool) -> Iterator[tuple]:
         except RunnerError as exc:
             yield (
                 header,
+                dna("failed", f"Could not start: {exc}"),
                 _stages_html({}),
                 str(exc),
                 f'<div class="metric-card">{pill("Cannot start", "bad")}'
@@ -392,6 +444,7 @@ def run_console(cfg: Config, sample_id: str, amx_on: bool) -> Iterator[tuple]:
         events = runner.run(spec, amx_on=amx_on)
 
     last_emit = 0.0
+    last_log_at = time.time()
     stages: dict[str, dict] = {}
     result: RunResult | None = None
     reported_isa: str | None = None
@@ -405,6 +458,7 @@ def run_console(cfg: Config, sample_id: str, amx_on: bool) -> Iterator[tuple]:
         if event.kind == "log":
             lines = STATE.record_log(key, event.line)
             now = time.time()
+            last_log_at = now
             # Throttle UI updates; DeepVariant emits far more lines than a
             # booth screen can usefully render.
             if now - last_emit > 0.25:
@@ -413,19 +467,50 @@ def run_console(cfg: Config, sample_id: str, amx_on: bool) -> Iterator[tuple]:
                     f'{banner}<div style="margin-bottom:12px;">{amx_pill} {pill(isa, "")} '
                     f'{pill(fmt_duration(event.elapsed_s), "")}</div>'
                 )
-                yield head, _stages_html(stages), "\n".join(lines), ""
+                yield (
+                    head,
+                    dna("running", DNA_RUNNING_CAPTION),
+                    _stages_html(stages),
+                    "\n".join(lines),
+                    "",
+                )
+        elif event.kind == "heartbeat":
+            silent_s = time.time() - last_log_at
+            if silent_s >= QUIET_AFTER_S:
+                yield (
+                    gr.skip(),
+                    dna("quiet", _dna_caption_quiet(silent_s)),
+                    gr.skip(),
+                    gr.skip(),
+                    gr.skip(),
+                )
         elif event.kind == "done":
             result = event.result
 
     lines = STATE.logs.get(key, [])
     if result is None:
-        yield header, _stages_html(stages), "\n".join(lines), ""
+        yield (
+            header,
+            dna("failed", "The run ended without reporting a result."),
+            _stages_html(stages),
+            "\n".join(lines),
+            "",
+        )
         return
 
     STATE.last_single = result
+    if result.succeeded:
+        finished = dna(
+            "done",
+            f"Finished in {fmt_duration(result.wall_clock_s)}. "
+            "Measured wall clock, not an estimate.",
+        )
+    else:
+        finished = dna("failed", "The run failed. The log below has the error.")
     yield (
         f'{banner}<div style="margin-bottom:12px;">{amx_pill} {pill(isa, "")} '
         f'{pill(fmt_duration(result.wall_clock_s), "on" if result.succeeded else "bad")}</div>',
+        finished,
         _stages_html(stages),
         "\n".join(lines),
         _run_summary(cfg, result, reported_isa, use_replay),
@@ -903,6 +988,7 @@ def build_app(cfg: Config) -> gr.Blocks:
                     elem_classes="start-button",
                 )
                 console_header = gr.HTML()
+                console_dna = gr.HTML(dna_helix("idle", DNA_IDLE_CAPTION))
                 console_stages = gr.HTML(_stages_html({}))
                 console_summary = gr.HTML()
                 console_logs = gr.Textbox(
@@ -922,7 +1008,7 @@ def build_app(cfg: Config) -> gr.Blocks:
                 start_btn.click(
                     lambda sid, on: (yield from run_console(cfg, sid, on)),
                     inputs=[console_sample, amx_switch],
-                    outputs=[console_header, console_stages, console_logs, console_summary],
+                    outputs=[console_header, console_dna, console_stages, console_logs, console_summary],
                 )
 
             # ---------------- AMX RACE ----------------

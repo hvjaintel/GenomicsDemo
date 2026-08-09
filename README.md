@@ -42,6 +42,9 @@ This demo shows real numbers or it shows nothing.
   "Illustrative" style and labelled as an assumption.
 - Replay mode shows a permanent, unmistakable banner. Replays are recordings of real runs,
   never synthesised.
+- The DNA helix on the Run console is an **activity** indicator, not a progress bar. It turns
+  only while the container is producing output and freezes when output stops, so a wedged run
+  looks wedged. Progress is the stage bars, which are parsed from DeepVariant's own output.
 
 ---
 
@@ -276,6 +279,7 @@ Nothing to reset. Press the button again — each run writes to its own director
 | Symptom | Action |
 |---|---|
 | A run fails mid-demo | The error is shown on screen. Press START again — one click. |
+| The helix stops turning mid-run | Expected during long `call_variants` batches; the caption says how long output has been quiet. If it stays frozen for minutes, check `docker ps` — the container may be wedged. |
 | Docker died | `sudo systemctl restart docker`, then re-run. |
 | UI unresponsive | Ctrl-C, then `./run_demo.sh --skip-checks` (~2 s restart). |
 | Hardware unavailable entirely | Set `demo_mode.policy: always` in `config.yaml` to replay a recorded run. The replay banner makes this obvious to the audience. |

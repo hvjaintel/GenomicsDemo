@@ -93,7 +93,7 @@ def _run_leg(
             log.append(event.line)
             if not quiet:
                 print(f"  {event.line}", flush=True)
-        elif event.kind == "progress" and quiet:
+        elif event.kind == "heartbeat" and quiet:
             pct = event.overall_percent or 0.0
             if pct - last_pct >= 10:
                 last_pct = pct

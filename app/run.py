@@ -160,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if event.kind == "log" and not args.quiet:
             print(event.line, flush=True)
-        elif event.kind == "progress":
+        elif event.kind == "heartbeat":
             pct = event.overall_percent
             if pct - last_pct >= 1.0:
                 last_pct = pct

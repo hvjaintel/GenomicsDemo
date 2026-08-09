@@ -671,3 +671,213 @@ def test_accel_badge_gradient_is_legible_at_both_ends(cfg):
     for stop in stops:
         ratio = _contrast_ratio(text, stop)
         assert ratio >= 4.5, f"badge text {text} on gradient stop {stop} is {ratio:.2f}:1"
+
+
+# ---------------------------------------------------------------------------
+# Run console activity helix
+# ---------------------------------------------------------------------------
+
+
+def test_dna_helix_rejects_unknown_state():
+    from app.ui.components import dna_helix
+
+    with pytest.raises(ValueError):
+        dna_helix("spinning", "caption")
+
+
+def test_dna_helix_only_animates_in_the_running_state():
+    """The point of the helix is that stillness means something.
+
+    If it kept turning after the run finished, or while the container had gone
+    quiet, it would be decoration rather than a signal -- and a wedged run would
+    look identical to a healthy one on the booth screen.
+    """
+    from app.theme import build_css
+    from app.ui.components import DNA_STATES, dna_helix
+
+    css = build_css(Config.load())
+    assert ".dna-panel:not(.running) .dna-node" in css
+    assert "animation-play-state: paused" in css
+
+    for state in DNA_STATES:
+        html = dna_helix(state, "caption")
+        assert f'class="dna-panel {state}"' in html
+
+
+def test_dna_helix_caption_is_escaped():
+    from app.ui.components import dna_helix
+
+    html = dna_helix("failed", "<script>alert(1)</script>")
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_running_caption_carries_no_changing_values():
+    """A caption that ticks would restart the animation on every render.
+
+    Gradio swaps the element's HTML whenever the value differs, and a fresh node
+    starts its CSS animation from the first keyframe. An elapsed-time counter in
+    the caption would therefore leave the helix twitching rather than turning,
+    which is why elapsed time lives on the header pill instead.
+    """
+    import re
+
+    from app.main import DNA_RUNNING_CAPTION
+
+    assert not re.search(r"\d", DNA_RUNNING_CAPTION), (
+        "the running caption must be constant; put changing values elsewhere"
+    )
+
+
+def test_helix_disclaims_being_a_progress_bar():
+    """The demo's whole argument is that shown numbers mean something.
+
+    An animation that looked like progress while being driven by nothing would
+    undercut that, so the caption has to say what it is.
+    """
+    from app.main import DNA_IDLE_CAPTION, DNA_RUNNING_CAPTION
+
+    for caption in (DNA_IDLE_CAPTION, DNA_RUNNING_CAPTION):
+        assert "progress" in caption.lower()
+
+
+def test_runner_emits_heartbeats_while_a_command_is_silent():
+    """The liveness claim has to be backed by a real event stream.
+
+    Iterating a pipe blocks until the next line, so a container that stops
+    talking also stops the caller's loop -- the UI would keep animating a run
+    that had wedged. This drives a process that prints, sleeps, then prints.
+    """
+    import subprocess
+
+    from app.runner import DeepVariantRunner
+
+    proc = subprocess.Popen(
+        ["sh", "-c", "echo first; sleep 3; echo second"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    items = list(DeepVariantRunner._readlines(proc))
+    proc.wait()
+
+    lines = [i.strip() for i in items if i is not None]
+    beats = [i for i in items if i is None]
+    assert lines == ["first", "second"]
+    assert beats, "no heartbeat was produced across a 3s silence"
+
+
+def test_runner_readlines_terminates_when_output_closes():
+    import subprocess
+
+    from app.runner import DeepVariantRunner
+
+    proc = subprocess.Popen(
+        ["sh", "-c", "echo only"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    items = list(DeepVariantRunner._readlines(proc))
+    proc.wait()
+    assert [i.strip() for i in items if i is not None] == ["only"]
+
+
+def test_heartbeat_is_the_event_kind_the_consumers_listen_for():
+    """These branches were previously dead.
+
+    They tested for kind == "progress", which the runner never emitted, so
+    `python -m app.run --quiet` printed nothing at all for the length of a run.
+    """
+    from pathlib import Path
+
+    for name in ("run.py", "race.py"):
+        src = Path("app", name).read_text()
+        assert 'kind == "progress"' not in src, f"{name} still listens for a dead event kind"
+        assert 'kind == "heartbeat"' in src
+
+
+def _helix_states(monkeypatch, beats: int, beat_seconds: float) -> list[str]:
+    """Drive run_console over a synthetic event stream and collect helix states."""
+    import types
+
+    import app.main as M
+    from app.runner import RunEvent, RunResult
+
+    clock = {"t": 1_000.0}
+    monkeypatch.setattr(M, "time", types.SimpleNamespace(time=lambda: clock["t"]))
+
+    def events():
+        yield RunEvent(kind="log", run_id="x", amx_on=True, line="starting", elapsed_s=0.1)
+        for i in range(beats):
+            clock["t"] += beat_seconds
+            yield RunEvent(kind="heartbeat", run_id="x", amx_on=True, elapsed_s=i)
+        yield RunEvent(kind="log", run_id="x", amx_on=True, line="talking again", elapsed_s=90)
+        result = RunResult(
+            run_id="x", amx_on=True, requested_isa="AVX512_CORE_AMX",
+            output_dir="/tmp", fingerprint="f", command="c",
+        )
+        result.started_at, result.finished_at, result.exit_code = 0.0, 100.0, 0
+        yield RunEvent(kind="done", run_id="x", amx_on=True, result=result)
+
+    class FakeRunner:
+        def __init__(self, cfg): pass
+        def reset_cancel(self): pass
+        def build_spec(self, sid): return object()
+        def run(self, spec, amx_on=True): return events()
+
+    monkeypatch.setattr(M, "DeepVariantRunner", FakeRunner)
+    monkeypatch.setattr(M.replay_mod, "should_replay", lambda cfg, live: False)
+
+    states = []
+    for out in M.run_console(Config.load(), "smoke", True):
+        dna = out[1]
+        if isinstance(dna, str) and "dna-panel" in dna:
+            states.append(dna.split("dna-panel ")[1].split('"')[0])
+    return states
+
+
+def test_helix_stops_when_output_stops_and_restarts_when_it_returns(monkeypatch):
+    """A wedged run must not look like a healthy one on the booth screen."""
+    states = _helix_states(monkeypatch, beats=40, beat_seconds=2.0)
+
+    assert states[0] == "running"
+    assert "quiet" in states, "the helix never stopped despite a long silence"
+    assert states.index("quiet") > 0
+    # Output resumes, so it must start turning again before the run ends.
+    assert states[-2] == "running"
+    assert states[-1] == "done"
+
+
+def test_helix_keeps_turning_through_ordinary_gaps(monkeypatch):
+    """DeepVariant pauses routinely; the indicator must not cry wolf."""
+    states = _helix_states(monkeypatch, beats=10, beat_seconds=1.0)
+
+    assert "quiet" not in states, f"flagged a {10 * 1.0:.0f}s gap as a stall: {states}"
+    assert states[-1] == "done"
+
+
+def test_helix_is_not_re_sent_while_nothing_about_it_changes(monkeypatch):
+    """Re-sending identical markup would restart the CSS animation."""
+    states = _helix_states(monkeypatch, beats=10, beat_seconds=1.0)
+
+    # running -> done, and nothing in between: ten beats produced no updates.
+    assert states == ["running", "done"], states
+
+
+def test_helix_respects_reduced_motion():
+    """Looping motion on a large screen is a genuine accessibility problem.
+
+    The helix still renders -- and its state colours still carry the meaning --
+    it just holds still.
+    """
+    from app.theme import build_css
+
+    css = build_css(Config.load())
+    assert "@media (prefers-reduced-motion: reduce)" in css
+    block = css.split("@media (prefers-reduced-motion: reduce)")[1]
+    assert "animation: none !important" in block
+    # Held still at the widest point rather than collapsed to a line.
+    assert ".dna-node.a { top: 4px; }" in block.replace("  ", " ")

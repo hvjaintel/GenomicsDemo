@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import shlex
 import shutil
 import subprocess
@@ -170,7 +171,7 @@ class RunResult:
 class RunEvent:
     """Streamed to the UI as a run progresses."""
 
-    kind: str  # "log" | "progress" | "done"
+    kind: str  # "log" | "heartbeat" | "done"
     run_id: str
     amx_on: bool
     line: str = ""
@@ -361,6 +362,44 @@ class DeepVariantRunner:
     def reset_cancel(self) -> None:
         self._cancel.clear()
 
+    # Seconds to wait for a line before yielding a beat instead. Short enough
+    # that cancel feels instant; long enough not to spin.
+    HEARTBEAT_S = 1.0
+
+    @classmethod
+    def _readlines(cls, proc: subprocess.Popen) -> Iterator[str | None]:
+        """Yield each line of the process's output, or None if it went quiet.
+
+        Iterating `proc.stdout` directly blocks until the next line arrives,
+        which means a container that stops producing output also stops the
+        caller's loop dead: no liveness signal reaches the UI, and a cancel
+        request sits unread until DeepVariant happens to print again. Draining
+        stdout on a thread and reading through a queue keeps this loop running
+        whether or not the container has anything to say.
+        """
+        assert proc.stdout is not None
+        lines: queue.Queue[str | None] = queue.Queue()
+
+        def pump() -> None:
+            try:
+                for raw in proc.stdout:  # type: ignore[union-attr]
+                    lines.put(raw)
+            finally:
+                lines.put(None)  # sentinel: stdout closed
+
+        reader = threading.Thread(target=pump, daemon=True)
+        reader.start()
+
+        while True:
+            try:
+                item = lines.get(timeout=cls.HEARTBEAT_S)
+            except queue.Empty:
+                yield None  # still running, just quiet
+                continue
+            if item is None:
+                return
+            yield item
+
     def run(
         self,
         spec: RunSpec,
@@ -436,8 +475,36 @@ class DeepVariantRunner:
 
         with log_path.open("w") as log_file:
             assert proc.stdout is not None
-            for raw in proc.stdout:
+            last_beat = start
+            for raw in self._readlines(proc):
                 now = time.time()
+
+                # Cancel is checked here rather than only after a line, because
+                # a wedged container produces no lines: the request used to sit
+                # unread until DeepVariant happened to print again.
+                if self._cancel.is_set():
+                    proc.kill()
+                    result.cancelled = True
+                    break
+
+                # A steady tick, whether or not output is flowing. The UI uses
+                # it to tell "working" from "wedged", and the headless runners
+                # use it to report progress in --quiet mode.
+                if now - last_beat >= self.HEARTBEAT_S:
+                    last_beat = now
+                    yield RunEvent(
+                        kind="heartbeat",
+                        run_id=run_id,
+                        amx_on=amx_on,
+                        elapsed_s=now - start,
+                        overall_percent=parser.overall_percent,
+                        stages=self._stage_payload(parser),
+                        reported_isa=parser.reported_isa,
+                    )
+
+                if raw is None:  # timeout fired; nothing to log
+                    continue
+
                 log_file.write(raw)
                 line = raw.rstrip("\n")
                 parser.feed(line, now)
@@ -459,11 +526,6 @@ class DeepVariantRunner:
                     stages=self._stage_payload(parser),
                     reported_isa=parser.reported_isa,
                 )
-
-                if self._cancel.is_set():
-                    proc.kill()
-                    result.cancelled = True
-                    break
 
             proc.wait()
 

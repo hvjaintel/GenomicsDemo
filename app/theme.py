@@ -223,6 +223,102 @@ def build_css(cfg: Config) -> str:
 .stage-time {{ width: 110px; text-align: right; font-variant-numeric: tabular-nums;
   font-size: 1.1rem; color: var(--ink-dim); font-weight: 600; }}
 
+/* ---------- DNA activity helix ---------- */
+/* A liveness indicator, not a progress bar -- see components.dna_helix.
+   Each pair is one column; the two nodes swap top and bottom over one period
+   and the rung stretches between them. Giving column i a negative delay
+   proportional to i offsets the phase along the row, which is what turns a set
+   of independent bobbing dots into a helix that appears to rotate. */
+.dna-panel {{
+  background: var(--panel); border: 1px solid var(--edge);
+  border-radius: 14px; padding: 18px 24px 14px; margin-bottom: 18px;
+}}
+.dna-helix {{
+  display: flex; align-items: stretch; justify-content: center;
+  gap: 10px; height: 86px;
+}}
+.dna-pair {{
+  position: relative; width: 10px; flex: 0 0 auto;
+  --period: 2.4s;
+  --phase: calc(var(--i) * var(--period) / -12);
+}}
+.dna-node, .dna-rung {{
+  position: absolute; left: 50%; transform: translateX(-50%);
+  animation-duration: var(--period);
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}}
+.dna-node {{
+  width: 10px; height: 10px; border-radius: 50%;
+  animation-name: dna-bob; animation-delay: var(--phase);
+}}
+.dna-node.a {{ background: var(--intel-bright); box-shadow: 0 0 10px rgba(0,199,253,0.55); }}
+.dna-node.b {{
+  background: var(--intel-blue); box-shadow: 0 0 10px rgba(0,104,181,0.55);
+  /* One full period, not half. With animation-direction: alternate the cycle
+     is two periods long, so a period/2 offset puts B a quarter-cycle behind A
+     rather than opposite it -- the strands then cross out of step with the
+     rung, which closes at its own rhythm and the helix reads as noise. */
+  animation-delay: calc(var(--phase) - var(--period));
+}}
+.dna-rung {{
+  width: 3px; border-radius: 2px;
+  background: linear-gradient(180deg, var(--intel-bright), var(--intel-blue));
+  opacity: 0.55;
+  /* The rung spans node centres, so it closes to nothing twice per period --
+     once at each crossing -- hence the halved duration. */
+  animation-name: dna-rung-top, dna-rung-height;
+  animation-duration: calc(var(--period) / 2), calc(var(--period) / 2);
+  animation-delay: var(--phase), var(--phase);
+  /* ease-in, not the ease-in-out the nodes use. The rung tracks the nearer of
+     the two nodes, which over half a period traces only the first half of the
+     nodes' curve -- the accelerating half. Matching ease-in-out here leaves the
+     rung visibly short of the nodes at mid-phase. */
+  animation-timing-function: ease-in;
+}}
+@keyframes dna-bob {{
+  from {{ top: 4px; }}
+  to   {{ top: calc(100% - 14px); }}
+}}
+@keyframes dna-rung-top {{
+  from {{ top: 9px; }}
+  to   {{ top: 50%; }}
+}}
+@keyframes dna-rung-height {{
+  from {{ height: calc(100% - 18px); }}
+  to   {{ height: 0px; }}
+}}
+
+/* Only the running state animates. Every other state freezes the helix, which
+   is the whole point: if output stops, the screen stops. */
+.dna-panel:not(.running) .dna-node,
+.dna-panel:not(.running) .dna-rung {{ animation-play-state: paused; }}
+.dna-panel.idle .dna-helix {{ opacity: 0.35; }}
+.dna-panel.quiet .dna-helix {{ opacity: 0.55; }}
+.dna-panel.done .dna-node.a, .dna-panel.done .dna-node.b {{
+  background: var(--amx-on); box-shadow: 0 0 10px rgba(0,224,143,0.5);
+}}
+.dna-panel.done .dna-rung {{ background: var(--amx-on); }}
+.dna-panel.failed .dna-node.a, .dna-panel.failed .dna-node.b {{
+  background: #FF6B6B; box-shadow: none;
+}}
+.dna-panel.failed .dna-rung {{ background: #FF6B6B; }}
+.dna-caption {{
+  margin-top: 12px; text-align: center;
+  font-size: 1rem; color: var(--ink-dim); line-height: 1.45;
+}}
+.dna-panel.running .dna-caption {{ color: var(--ink); }}
+.dna-panel.quiet .dna-caption {{ color: var(--amx-off); }}
+.dna-panel.failed .dna-caption {{ color: #FF8F8F; }}
+
+@media (prefers-reduced-motion: reduce) {{
+  .dna-node, .dna-rung {{ animation: none !important; }}
+  .dna-node.a {{ top: 4px; }}
+  .dna-node.b {{ top: calc(100% - 14px); }}
+  .dna-rung {{ top: 9px; height: calc(100% - 18px); }}
+}}
+
 /* ---------- race ---------- */
 .race-lane {{
   background: var(--panel); border: 1px solid var(--edge);

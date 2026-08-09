@@ -227,9 +227,17 @@ def test_tco_flags_estimated_versus_measured(cfg):
     assert estimated.runtime_is_measured is False
     assert "estimate" in estimated.runtime_source
 
-    measured = tco_compute(cfg, 50, measured_seconds_per_genome=1800.0)
+    # Derive the measured value from the estimate rather than hardcoding one.
+    # A literal here silently encodes whatever config.yaml happened to say when
+    # the test was written, and starts failing for an unrelated reason the day
+    # a real measurement replaces the estimate -- which is exactly what
+    # happened when the WGS runtime went from a 3600 s guess to a measured
+    # 1547 s. What this test is actually about is the measured/estimated flag
+    # and the direction of the arithmetic, not any particular runtime.
+    faster = estimated.seconds_per_genome / 2
+    measured = tco_compute(cfg, 50, measured_seconds_per_genome=faster)
     assert measured.runtime_is_measured is True
-    assert measured.seconds_per_genome == 1800.0
+    assert measured.seconds_per_genome == faster
     assert measured.genomes_per_day > estimated.genomes_per_day
 
 

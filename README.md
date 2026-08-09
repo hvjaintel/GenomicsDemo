@@ -163,11 +163,25 @@ still on the unmounted disk.
 Add it to `/etc/fstab` so it comes back automatically:
 
 ```bash
-sudo blkid /dev/nvme2n1                     # note the UUID
-echo 'UUID=<uuid> /mnt/nvme2n1 ext4 defaults,noatime,nofail 0 2' | sudo tee -a /etc/fstab
+# Substitutes the UUID itself -- do not retype it, and do not paste a
+# placeholder. A literal "<uuid>" in fstab is accepted silently by `mount -a`
+# when `nofail` is set, so the mount just never happens and the next reboot
+# looks like data loss again.
+echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme2n1) /mnt/nvme2n1 ext4 defaults,noatime,nofail 0 2" \
+  | sudo tee -a /etc/fstab
+
 sudo systemctl daemon-reload
+findmnt --verify                            # must report no [E] lines
 sudo mount -a                               # verify it mounts cleanly NOW
 findmnt /mnt/nvme2n1                        # should print the device
+```
+
+`findmnt --verify` is the check that matters. If it prints
+`[E] unreachable on boot required source: UUID=<uuid>`, the placeholder was
+pasted literally; fix that line before rebooting:
+
+```bash
+sudo sed -i "s|^UUID=<uuid> /mnt/nvme2n1 .*$|UUID=$(sudo blkid -s UUID -o value /dev/nvme2n1) /mnt/nvme2n1 ext4 defaults,noatime,nofail 0 2|" /etc/fstab
 ```
 
 `nofail` matters: without it, a missing data disk drops the machine to an emergency

@@ -155,6 +155,11 @@ def _check_image(cfg: Config, snap: SystemSnapshot) -> Check:
 
 def _check_datasets(cfg: Config) -> list[Check]:
     checks: list[Check] = []
+    # When the data volume is merely unmounted, every dataset reports missing.
+    # Telling someone to re-download 46 GB in that state is actively harmful --
+    # it targets the OS disk and fills it. Point at the mount instead.
+    unmounted = cfg.data_disk_looks_unmounted
+    mountpoint = Path(cfg.raw["paths"]["data_root"]).parent
     for sample in cfg.booth_samples:
         dataset = cfg.dataset(sample.dataset)
         path = cfg.data_root / dataset.local
@@ -165,13 +170,14 @@ def _check_datasets(cfg: Config) -> list[Check]:
 
         flag = " --with-wgs" if dataset.tier == "wgs" else ""
         if missing:
+            if unmounted:
+                detail = "unreachable — the data volume is not mounted"
+                fix = f"sudo mount {mountpoint}   (do NOT re-download; the files are on that disk)"
+            else:
+                detail = f"not staged ({len(missing)} file(s) missing)"
+                fix = f"./scripts/fetch_data.sh{flag}"
             checks.append(
-                Check(
-                    f"Dataset · {sample.label}",
-                    Status.WARN,
-                    f"not staged ({len(missing)} file(s) missing)",
-                    f"./scripts/fetch_data.sh{flag}",
-                )
+                Check(f"Dataset · {sample.label}", Status.WARN, detail, fix)
             )
             continue
 
@@ -223,6 +229,15 @@ def _check_reference(cfg: Config) -> Check:
             "only the bgzipped reference is staged; it must be decompressed",
             "./scripts/fetch_data.sh",
         )
+    if cfg.data_disk_looks_unmounted:
+        mountpoint = Path(cfg.raw["paths"]["data_root"]).parent
+        return Check(
+            "Reference genome",
+            Status.FAIL,
+            "unreachable — the data volume is not mounted",
+            f"sudo mount {mountpoint}   (do NOT re-download; the 3 GB reference is on that disk)",
+            blocking=True,
+        )
     return Check(
         "Reference genome",
         Status.FAIL,
@@ -236,11 +251,25 @@ def _check_storage(cfg: Config, snap: SystemSnapshot) -> Check:
     storage = snap.storage
     free_gb = storage.free_gb
     if storage.is_fallback:
+        configured = cfg.raw["paths"]["data_root"]
+        if cfg.data_disk_looks_unmounted:
+            mountpoint = Path(configured).parent
+            return Check(
+                "Data storage",
+                Status.FAIL,
+                f"the data volume is NOT MOUNTED — {mountpoint} exists but is empty. "
+                f"Falling back to {storage.path} on the OS drive ({free_gb:.0f} GB free).",
+                f"Your data is still on that disk; nothing was lost. Remount it:\n"
+                f"    sudo mount {mountpoint}\n"
+                f"Then add it to /etc/fstab so a reboot cannot drop it again "
+                f"(see README -> Persisting the data mount).",
+                blocking=True,
+            )
         return Check(
             "Data storage",
             Status.WARN,
             f"using repo-local fallback {storage.path} — {free_gb:.0f} GB free. "
-            f"Configured U.2 path {cfg.raw['paths']['data_root']} is not mounted or not writable.",
+            f"Configured U.2 path {configured} is not mounted or not writable.",
             "Mount and claim the U.2 NVMe (see README -> Staging the U.2 NVMe). "
             "The full 46 GB WGS sample will not fit on the OS drive.",
         )

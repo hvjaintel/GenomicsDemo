@@ -556,3 +556,31 @@ def test_mountpoint_holding_other_files_is_not_reported_as_unmounted(tmp_path):
     (mountpoint / "lost+found").mkdir()
     cfg = _config_with_data_root(tmp_path, mountpoint / "genomics")
     assert cfg.data_disk_looks_unmounted is False
+
+
+def test_preflight_points_at_mount_not_download_when_unmounted(tmp_path):
+    """An unmounted volume must never be answered with "re-download".
+
+    Every dataset reports missing in that state. Following a fetch_data.sh
+    suggestion would pull tens of GB onto the OS disk while the real files sit
+    on the unmounted volume -- the exact failure this guards.
+    """
+    from app.preflight import _check_datasets, _check_reference
+
+    mountpoint = tmp_path / "nvme"
+    mountpoint.mkdir()
+    cfg = _config_with_data_root(tmp_path, mountpoint / "genomics")
+
+    advice = [c.remedy for c in _check_datasets(cfg)] + [_check_reference(cfg).remedy]
+    assert advice, "expected at least one check to report a problem"
+    for remedy in advice:
+        assert "mount" in remedy
+        assert "fetch_data.sh" not in remedy
+
+
+def test_preflight_still_suggests_download_when_never_staged(tmp_path):
+    # Nothing at the path at all: downloading really is the right answer.
+    from app.preflight import _check_reference
+
+    cfg = _config_with_data_root(tmp_path, tmp_path / "nvme" / "genomics")
+    assert "fetch_data.sh" in _check_reference(cfg).remedy

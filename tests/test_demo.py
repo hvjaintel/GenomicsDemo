@@ -6,6 +6,7 @@ audience, and would catch a change that made the demo dishonest.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import gzip
 import json
@@ -498,3 +499,52 @@ def test_chr20_runtimes_are_marked_measured_not_illustrative(cfg):
     assert chr20.illustrative is False
     assert chr20.runtime_fast_s and chr20.runtime_slow_s
     assert chr20.runtime_slow_s > chr20.runtime_fast_s
+
+
+# ---------------------------------------------------------------------------
+# Unmounted data volume detection
+#
+# This is a disk-safety guard, not a cosmetic one: when the U.2 volume is not
+# mounted, the config falls back to ./data inside the repo, which lives on the
+# 100 GB OS disk. Silently downloading the 46 GB WGS BAM there fills the root
+# filesystem. These tests pin the distinction between "not mounted" (fixable
+# with `mount`, data still on the disk) and "never set up" (needs a download).
+# ---------------------------------------------------------------------------
+
+
+def _config_with_data_root(tmp_path, root):
+    cfg = Config.load()
+    raw = copy.deepcopy(cfg.raw)
+    raw["paths"]["data_root"] = str(root)
+    raw["paths"]["data_root_fallback"] = str(tmp_path / "fallback")
+    return Config(raw, cfg.source)
+
+
+def test_empty_mountpoint_is_reported_as_unmounted(tmp_path):
+    mountpoint = tmp_path / "nvme"
+    mountpoint.mkdir()  # exists, but nothing mounted on it
+    cfg = _config_with_data_root(tmp_path, mountpoint / "genomics")
+    assert cfg.data_disk_looks_unmounted is True
+
+
+def test_populated_mountpoint_is_not_reported_as_unmounted(tmp_path):
+    mountpoint = tmp_path / "nvme"
+    (mountpoint / "genomics").mkdir(parents=True)
+    cfg = _config_with_data_root(tmp_path, mountpoint / "genomics")
+    assert cfg.data_disk_looks_unmounted is False
+
+
+def test_absent_mountpoint_is_not_reported_as_unmounted(tmp_path):
+    # Nothing at all at the path: this box was never set up, so a download is
+    # the correct action and must not be blocked.
+    cfg = _config_with_data_root(tmp_path, tmp_path / "nvme" / "genomics")
+    assert cfg.data_disk_looks_unmounted is False
+
+
+def test_mountpoint_holding_other_files_is_not_reported_as_unmounted(tmp_path):
+    # Something is mounted or staged there, just not our directory yet.
+    mountpoint = tmp_path / "nvme"
+    mountpoint.mkdir()
+    (mountpoint / "lost+found").mkdir()
+    cfg = _config_with_data_root(tmp_path, mountpoint / "genomics")
+    assert cfg.data_disk_looks_unmounted is False

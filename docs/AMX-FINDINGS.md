@@ -398,3 +398,48 @@ pipeline that also marks duplicates.
 Before repeating any third-party figure at the booth, get four things:
 **node count, tool identity, dataset coverage, and stage scope.** Without all
 four the number is not comparable to anything this demo shows.
+
+---
+
+# Postscript — the whole-genome number, and a correction
+
+The full HG002 35x genome has now actually been run on this box, rather than
+extrapolated. DeepVariant 1.10.0, all 192 threads, 192 shards:
+
+| Stage | Time |
+| --- | --- |
+| make_examples | 13m 50s |
+| call_variants | 11m 05s |
+| postprocess_variants | 49s |
+| **Total** | **25m 47s** |
+
+7,709,239 variants.
+
+**This corrects two things written earlier in this session.**
+
+First, the extrapolation. Scaling the measured chr20 time by genome size
+predicted ~46 minutes. The real figure is 25m 47s. Whole-genome runs have far
+more independent work available than a single chromosome, so make_examples
+parallelises better across 192 threads than chr20 allows. **chr20 understates
+whole-genome scaling**, and the error is not small. Extrapolating from one
+contig to a genome is not sound; it is recorded here as a caution, not a
+method.
+
+Second, and more importantly: the appendix above argued that a 22.57-minute
+single-node figure was "15-20x too fast" and implied a cluster. **That
+reasoning was wrong**, and it was wrong because it was anchored on v1.5, which
+genuinely does take hours here. On v1.10 this single dual-socket server does
+the whole genome in 25m 47s. A 22.57-minute end-to-end result on one node is
+therefore entirely plausible, and the burden-of-proof framing in the appendix
+overstated the case.
+
+What survives from that appendix is narrower and still worth asking about:
+`fq2bam` is NVIDIA Parabricks' GPU tool and not an Intel one; Intel's own
+published *single-socket* figure for their v1.5-based pipeline is 109 minutes;
+and stage scope still differs between pipelines (duplicate marking and BQSR).
+Those are questions to ask about a number, not grounds to reject it.
+
+The general lesson is the one this whole document keeps arriving at: an
+estimate derived from a smaller run is a hypothesis, and it stays a hypothesis
+until the real workload is measured. That applies to estimates that flatter
+this machine as much as to ones that flatter someone else's.

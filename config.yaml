@@ -342,10 +342,19 @@ samples:
     dataset: "wgs_bam"
     regions: null
     blurb: "The headline run. Complete 30-35x human genome, 46 GB of aligned reads."
-    # Still estimates -- the full WGS BAM has not been run on this box. Scaled
-    # from the measured chr20 numbers by genome/chr20 size, which is only a
-    # rough guide because whole-genome I/O behaves differently.
-    runtime_fast_s: 3600
+    # runtime_fast_s is MEASURED on this box: 25m 47s (1547 s) on all 192
+    # threads, 192 shards, DeepVariant 1.10.0, 7,709,239 variants.
+    #   make_examples 13m50s | call_variants 11m05s | postprocess 49s
+    # For reference, Google publish 69 min for 1.10 on a 96-vCPU n2-standard-96.
+    #
+    # Note this beat the estimate scaled from chr20 (~46 min) by a wide margin:
+    # a whole genome offers far more independent work than a single contig, so
+    # chr20 UNDERSTATES whole-genome scaling. Do not extrapolate the other way.
+    #
+    # runtime_slow_s (16-core leg) is still an estimate -- that run was launched
+    # but the box rebooted before it finished. Since `illustrative` governs both
+    # numbers, it stays true until the baseline is measured too.
+    runtime_fast_s: 1547
     runtime_slow_s: 9000
     illustrative: true
     show_in_booth: true

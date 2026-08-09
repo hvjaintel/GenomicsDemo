@@ -164,6 +164,33 @@ class Config:
         return not (primary.is_dir() and os.access(primary, os.W_OK))
 
     @property
+    def data_disk_looks_unmounted(self) -> bool:
+        """True when the data disk's mountpoint exists but is empty.
+
+        Distinguishes "the volume is not mounted" from "this box was never set
+        up". The difference matters: an empty mountpoint means someone rebooted
+        and the mount did not come back, and the datasets are almost certainly
+        still on the disk. Falling back to ./data in that state would quietly
+        re-download tens of GB onto the OS drive, which is exactly how the root
+        filesystem fills up.
+
+        Only reports on a mountpoint we did not create -- if the configured root
+        itself exists, there is nothing to warn about.
+        """
+        primary = Path(self.raw["paths"]["data_root"])
+        if primary.is_dir():
+            return False
+        # e.g. data_root=/mnt/nvme2n1/genomics -> mountpoint=/mnt/nvme2n1
+        mountpoint = primary.parent
+        if not mountpoint.is_dir():
+            return False
+        try:
+            empty = not any(mountpoint.iterdir())
+        except OSError:
+            return False
+        return empty and not os.path.ismount(mountpoint)
+
+    @property
     def runs_dir(self) -> Path:
         return self.data_root / self.raw["paths"].get("runs_dir", "runs")
 

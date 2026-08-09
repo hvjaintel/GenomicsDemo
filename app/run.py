@@ -103,6 +103,20 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = Config.load()
+
+    # An unmounted data volume looks identical to missing data, except that the
+    # fix is completely different. Say which one it is before the runner raises
+    # a "BAM not staged" error that sends someone off to re-download 46 GB.
+    if cfg.data_disk_looks_unmounted:
+        mountpoint = Path(cfg.raw["paths"]["data_root"]).parent
+        print(
+            f"The data volume looks UNMOUNTED, not missing.\n"
+            f"  {mountpoint} exists but is empty.\n"
+            f"Mount it and re-run:  sudo mount {mountpoint}",
+            file=sys.stderr,
+        )
+        return 2
+
     runner = DeepVariantRunner(cfg)
     spec = runner.build_spec(args.sample)
     if args.cores:

@@ -26,6 +26,10 @@
 #   ./scripts/fetch_data.sh                      # core tier only
 #   ./scripts/fetch_data.sh --with-truth         # + accuracy panel data
 #   ./scripts/fetch_data.sh --with-wgs           # + the 46 GB headline BAM
+#
+#   --allow-fallback-root  download to ./data even if the data volume looks
+#                          unmounted. Refused by default so an unmounted disk
+#                          cannot silently fill the OS drive.
 #   ./scripts/fetch_data.sh --all                # everything except FASTQ
 #   ./scripts/fetch_data.sh --verify-only        # re-verify, download nothing
 # =============================================================================
@@ -40,6 +44,7 @@ WITH_WGS=0
 WITH_FASTQ=0
 VERIFY_ONLY=0
 BUILD_INDEX=0
+ALLOW_FALLBACK_ROOT=0
 
 RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[0;33m'; BLU='\033[0;34m'; BLD='\033[1m'; NC='\033[0m'
 say()  { echo -e "${BLU}==>${NC} $*"; }
@@ -57,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --build-index) BUILD_INDEX=1 ;;
     --all)        WITH_TRUTH=1; WITH_WGS=1 ;;
     --verify-only) VERIFY_ONLY=1 ;;
+    --allow-fallback-root) ALLOW_FALLBACK_ROOT=1 ;;
     -h|--help)    usage ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -78,6 +84,39 @@ print(get_config().data_root)
 
 say "Config     : $CONFIG"
 say "Data root  : $DATA_ROOT"
+
+# Refuse to download onto the OS disk when the data volume is merely unmounted.
+# Without this the fallback root silently absorbs tens of GB and fills /.
+UNMOUNTED="$(cd "$REPO_ROOT" && GENOMICS_DEMO_CONFIG="$CONFIG" python3 -c '
+from app.config import get_config
+print("yes" if get_config().data_disk_looks_unmounted else "no")
+')" || die "could not read config.yaml"
+
+if [ "$UNMOUNTED" = "yes" ] && [ "$ALLOW_FALLBACK_ROOT" -eq 0 ]; then
+  CONFIGURED="$(cd "$REPO_ROOT" && GENOMICS_DEMO_CONFIG="$CONFIG" python3 -c '
+from app.config import get_config
+print(get_config().raw["paths"]["data_root"])
+')"
+  MOUNTPOINT="$(dirname "$CONFIGURED")"
+  die "$(cat <<EOF
+The data volume looks UNMOUNTED, not missing.
+
+  configured data root : $CONFIGURED
+  mountpoint           : $MOUNTPOINT  (exists, but is empty)
+  would fall back to   : $DATA_ROOT
+
+Downloading now would write tens of GB onto the OS disk. Your datasets are
+almost certainly still on the data volume -- mount it and re-run:
+
+  sudo mount $MOUNTPOINT
+
+If the mount is missing from /etc/fstab it will not survive a reboot. See the
+"Persisting the data mount" section of the README.
+
+To download to the fallback path anyway, pass --allow-fallback-root.
+EOF
+)"
+fi
 
 # Used only if a derived dataset needs slicing and the host has no samtools.
 ENGINE_IMAGE="$(cd "$REPO_ROOT" && GENOMICS_DEMO_CONFIG="$CONFIG" python3 -c '

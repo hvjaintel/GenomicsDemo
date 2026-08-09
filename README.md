@@ -88,6 +88,38 @@ Open `http://localhost:7860` full screen on the booth monitor.
 
 ---
 
+## The bench server
+
+Everything measured in this repo was run on this machine. Quote numbers from here
+only alongside this configuration — a wall-clock time without its hardware is not a
+claim anyone can check.
+
+| | |
+|---|---|
+| CPU | 2x Intel Xeon 6740P — 48 cores/socket, **96 cores / 192 threads** total |
+| Memory | 1 TB |
+| OS disk | 1x M.2 NVMe 960 GB |
+| Data disks | 2x U.2 NVMe 4 TB |
+
+Datasets live on a U.2 data disk (`/mnt/nvme2n1`), never the OS disk — the WGS BAM
+alone is 46 GB. See "Persisting the data mount" below.
+
+### Measured whole-genome run
+
+HG002, 35x, GRCh38, DeepVariant 1.10.0, all 192 threads, 192 shards:
+
+| Stage | Time |
+|---|---|
+| `make_examples` | 13m 50s |
+| `call_variants` | 11m 05s |
+| `postprocess_variants` | 49s |
+| **Total** | **25m 47s** |
+
+7,709,239 variants called. For scale, Google's own published figure for the same
+version is 69 minutes on a 96-vCPU cloud instance.
+
+---
+
 ## Prerequisites
 
 | Requirement | Notes |
@@ -109,18 +141,47 @@ newgrp docker          # or log out and back in
 
 ### Staging the U.2 NVMe
 
-`config.yaml` expects the data drive at `paths.data_root` (`/data/genomics`). If it isn't
-mounted the app falls back to `./data` and pre-flight warns — the OS drive will **not** fit
-the 46 GB WGS BAM. To claim a spare U.2 device (destructive — check the device name first
-with `lsblk`):
+`config.yaml` expects the data drive at `paths.data_root`, which is
+`/mnt/nvme2n1/genomics`. To claim a spare U.2 device (destructive — check the device
+name against `lsblk` first, and be certain it is not the OS disk):
 
 ```bash
 sudo mkfs.ext4 -L genomics /dev/nvme2n1
-sudo mkdir -p /data
-echo 'LABEL=genomics /data ext4 defaults,noatime 0 2' | sudo tee -a /etc/fstab
-sudo mount /data
-sudo mkdir -p /data/genomics && sudo chown "$USER:$USER" /data/genomics
+sudo mkdir -p /mnt/nvme2n1
+sudo mount /dev/nvme2n1 /mnt/nvme2n1
+sudo mkdir -p /mnt/nvme2n1/genomics && sudo chown "$USER:$USER" /mnt/nvme2n1/genomics
 ```
+
+### Persisting the data mount
+
+**Do this, or a reboot will appear to delete all your data.** A mount created with
+`mount` alone does not survive a restart. When it vanishes, the configured data root
+stops existing, the app falls back to `./data` on the OS drive, and every dataset
+reports as missing — which looks exactly like data loss but is not. The files are
+still on the unmounted disk.
+
+Add it to `/etc/fstab` so it comes back automatically:
+
+```bash
+sudo blkid /dev/nvme2n1                     # note the UUID
+echo 'UUID=<uuid> /mnt/nvme2n1 ext4 defaults,noatime,nofail 0 2' | sudo tee -a /etc/fstab
+sudo systemctl daemon-reload
+sudo mount -a                               # verify it mounts cleanly NOW
+findmnt /mnt/nvme2n1                        # should print the device
+```
+
+`nofail` matters: without it, a missing data disk drops the machine to an emergency
+shell at boot rather than starting normally.
+
+If a reboot has already dropped the mount, nothing is lost — just remount:
+
+```bash
+sudo mount /mnt/nvme2n1
+```
+
+`fetch_data.sh` and `python -m app.run` both detect this state (an empty mountpoint)
+and refuse to run rather than re-downloading tens of GB onto the OS disk. Override
+with `--allow-fallback-root` only if you genuinely intend to stage data on `/`.
 
 ---
 

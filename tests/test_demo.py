@@ -584,3 +584,90 @@ def test_preflight_still_suggests_download_when_never_staged(tmp_path):
 
     cfg = _config_with_data_root(tmp_path, tmp_path / "nvme" / "genomics")
     assert "fetch_data.sh" in _check_reference(cfg).remedy
+
+
+# ---------------------------------------------------------------------------
+# Booth legibility
+#
+# The app is read across a trade-show aisle, so contrast is a functional
+# requirement rather than a cosmetic one. Gradio defaults the radio option
+# label text to *body_text_color (near-white in this theme) but its background
+# to *button_secondary_background_fill (a light gradient), which rendered the
+# sample selector as white-on-white. These tests pin both halves.
+# ---------------------------------------------------------------------------
+
+
+def _relative_luminance(hex_colour: str) -> float:
+    raw = hex_colour.lstrip("#")
+    channels = [int(raw[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    r, g, b = linear
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast_ratio(fg: str, bg: str) -> float:
+    a, b = _relative_luminance(fg), _relative_luminance(bg)
+    lighter, darker = max(a, b), min(a, b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def test_contrast_helper_matches_known_values():
+    # Anchor the helper itself, so a bug in it cannot silently pass the checks
+    # below. Black on white is the defined maximum of 21:1.
+    assert _contrast_ratio("#000000", "#FFFFFF") == pytest.approx(21.0, abs=0.01)
+    assert _contrast_ratio("#FFFFFF", "#FFFFFF") == pytest.approx(1.0, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    "fg_token,bg_token",
+    [
+        ("checkbox_label_text_color", "checkbox_label_background_fill"),
+        ("checkbox_label_text_color_selected", "checkbox_label_background_fill_selected"),
+        ("button_secondary_text_color", "button_secondary_background_fill"),
+    ],
+)
+def test_selector_labels_meet_wcag_aa(cfg, fg_token, bg_token):
+    from app.theme import build_theme
+
+    theme = build_theme(cfg)
+    fg = getattr(theme, fg_token)
+    bg = getattr(theme, bg_token)
+    assert fg.startswith("#") and bg.startswith("#"), (
+        f"{fg_token}/{bg_token} must be literal hex, not a Gradio *token -- "
+        "an unresolved token is how the white-on-white bug got in"
+    )
+    ratio = _contrast_ratio(fg, bg)
+    assert ratio >= 4.5, f"{fg} on {bg} is only {ratio:.2f}:1, below WCAG AA"
+
+
+def test_accel_badge_gradient_is_legible_at_both_ends(cfg):
+    """The hero badge's dark text must work across the whole gradient.
+
+    A gradient only has to fail at one end to be a problem, and that end is
+    easy to miss: the badge previously started at #0068B5, which gives 3.28:1
+    against its #04121F text. The right-hand side passed, so the badge looked
+    acceptable in a screenshot while its left third washed out on the booth
+    display.
+    """
+    import re
+
+    from app.theme import build_css
+
+    css = build_css(cfg)
+    block = re.search(r"\.accel-badge \{(.*?)\n\}", css, re.S)
+    assert block, "accel-badge rule not found"
+
+    gradient = re.search(r"background: linear-gradient\([^)]*\)", block.group(1))
+    assert gradient, "accel-badge should use a linear-gradient background"
+    stops = re.findall(r"#[0-9A-Fa-f]{6}", gradient.group(0))
+    resolved = re.findall(r"var\(--([a-z-]+)\)", gradient.group(0))
+    for name in resolved:
+        found = re.search(rf"--{name}:\s*(#[0-9A-Fa-f]{{6}})", css)
+        assert found, f"gradient references --{name} but it is not defined"
+        stops.append(found.group(1))
+
+    text = re.search(r"color: (#[0-9A-Fa-f]{6})", block.group(1)).group(1)
+    assert len(stops) >= 2, f"expected at least two gradient stops, got {stops}"
+    for stop in stops:
+        ratio = _contrast_ratio(text, stop)
+        assert ratio >= 4.5, f"badge text {text} on gradient stop {stop} is {ratio:.2f}:1"

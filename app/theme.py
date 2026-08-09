@@ -38,12 +38,68 @@ def build_theme(cfg: Config) -> gr.Theme:
         button_primary_text_color="#FFFFFF",
         input_background_fill="#0D141D",
         panel_background_fill="#111823",
+        # The general surface fills. These were the real gap: the theme set
+        # block_background_fill and panel_background_fill but left
+        # background_fill_primary/secondary at their light defaults, and Gradio
+        # uses those for tables and the tab bar. The pre-flight table was
+        # rendering near-white text on white at a contrast ratio of 1.12:1 --
+        # invisible, not merely hard to read.
+        background_fill_primary="#111823",
+        background_fill_primary_dark="#111823",
+        background_fill_secondary="#0D141D",
+        background_fill_secondary_dark="#0D141D",
+        table_even_background_fill="#111823",
+        table_even_background_fill_dark="#111823",
+        table_odd_background_fill="#0D141D",
+        table_odd_background_fill_dark="#0D141D",
+        table_text_color="#E8EEF5",
+        table_text_color_dark="#E8EEF5",
+        table_border_color="#1F2C3D",
+        table_border_color_dark="#1F2C3D",
+        # Radio and checkbox option labels.
+        #
+        # These need setting explicitly. Gradio defaults checkbox_label_text_color
+        # to *body_text_color -- which is near-white here -- while defaulting
+        # checkbox_label_background_fill to *button_secondary_background_fill,
+        # which stays a LIGHT gradient. The result on the booth screen was
+        # near-white text in a white box: the sample selector was effectively
+        # unreadable. Both halves have to be pinned, not just one.
+        checkbox_label_background_fill="#0D141D",
+        checkbox_label_background_fill_dark="#0D141D",
+        checkbox_label_background_fill_hover="#18222F",
+        checkbox_label_background_fill_hover_dark="#18222F",
+        checkbox_label_background_fill_selected=accent,
+        checkbox_label_background_fill_selected_dark=accent,
+        checkbox_label_text_color="#E8EEF5",
+        checkbox_label_text_color_dark="#E8EEF5",
+        checkbox_label_text_color_selected="#FFFFFF",
+        checkbox_label_text_color_selected_dark="#FFFFFF",
+        checkbox_label_border_color="#1F2C3D",
+        checkbox_label_border_color_dark="#1F2C3D",
+        checkbox_label_border_color_hover="#2C3E55",
+        checkbox_label_border_color_hover_dark="#2C3E55",
+        checkbox_background_color="#0D141D",
+        checkbox_background_color_dark="#0D141D",
+        checkbox_background_color_selected=accent,
+        checkbox_background_color_selected_dark=accent,
+        checkbox_border_color="#2C3E55",
+        checkbox_border_color_dark="#2C3E55",
+        # Secondary buttons inherit the same light default; pin them too so the
+        # CSS override in build_css() is a refinement rather than the only thing
+        # standing between the booth and unreadable controls.
+        button_secondary_background_fill="#18222F",
+        button_secondary_background_fill_dark="#18222F",
+        button_secondary_background_fill_hover="#22303F",
+        button_secondary_background_fill_hover_dark="#22303F",
+        button_secondary_text_color="#E8EEF5",
+        button_secondary_text_color_dark="#E8EEF5",
     )
 
 
 def build_css(cfg: Config) -> str:
     accent = cfg.demo.get("theme_accent", "#0068B5")
     accent_bright = cfg.demo.get("theme_accent_bright", "#00C7FD")
+    badge_start = cfg.demo.get("theme_badge_start", "#00AEEF")
     return f"""
 :root {{
   --intel-blue: {accent};
@@ -99,7 +155,12 @@ def build_css(cfg: Config) -> str:
 /* ---------- badges ---------- */
 .accel-badge {{
   display: inline-block; padding: 16px 30px; border-radius: 14px;
-  background: linear-gradient(135deg, var(--intel-blue), var(--intel-bright));
+  /* Both gradient stops must stay light enough for the dark text below.
+     This used to start at --intel-blue (#0068B5), which gave only 3.28:1
+     against #04121F -- the left third of the badge failed WCAG AA while the
+     right end passed, so it read fine on a laptop and washed out on the booth
+     screen. #00AEEF is Intel's brighter brand cyan and scores 7.47:1. */
+  background: linear-gradient(135deg, {badge_start}, var(--intel-bright));
   color: #04121F; font-weight: 800; font-size: 1.5rem; letter-spacing: 0.04em;
 }}
 .accel-badge.missing {{ background: #6B2020; color: #FFD9D9; }}

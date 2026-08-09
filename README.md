@@ -9,8 +9,8 @@ server and proves three things to a live audience:
    192 threads — a measured **2.8×** (2.78× and 2.86× on two separate races), with both
    legs calling exactly the same 210,390 variants. Same arithmetic, more cores, no
    trade-off.
-3. It does so on a **quiet, air-cooled, bench-deployable** server co-engineered by Intel and
-   Kontron — deploy where the science happens, not in a loud data hall.
+3. It does so on a **quiet, air-cooled, bench-deployable** server — deploy where the science
+   happens, not in a loud data hall.
 
 > **About AMX.** This demo was originally designed around an AMX ON/OFF race. Measurement
 > killed that idea and we kept the measurement instead of the idea: stock DeepVariant 1.10
@@ -430,4 +430,4 @@ ISA verification catches a mismatch.
 Pipeline science: [DeepVariant](https://github.com/google/deepvariant) and Intel's
 [Open-Omics](https://github.com/IntelLabs/Open-Omics-Acceleration-Framework) optimisations.
 Data: [NIST GIAB](https://www.nist.gov/programs-projects/genome-bottle) and the public
-DeepVariant test-data bucket. Hardware co-engineering: Intel + Kontron.
+DeepVariant test-data bucket.

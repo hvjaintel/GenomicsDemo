@@ -881,3 +881,49 @@ def test_helix_respects_reduced_motion():
     assert "animation: none !important" in block
     # Held still at the widest point rather than collapsed to a line.
     assert ".dna-node.a { top: 4px; }" in block.replace("  ", " ")
+
+
+def _masthead_html(app) -> str:
+    """Locate the masthead by content; block ordering is not a contract."""
+    for block in app.blocks.values():
+        value = str(getattr(block, "value", "") or "")
+        if "booth-masthead" in value:
+            return value
+    raise AssertionError("masthead block not found")
+
+
+def test_masthead_omits_the_partner_mark_when_it_is_blank(cfg):
+    """A blank strapline must leave no trace, not an empty element.
+
+    The masthead is a flex row, so an empty child still participates in its
+    spacing, and the hardware note used to end "...fp32) — ." with the mark
+    removed. Both read as a rendering bug from three metres away.
+    """
+    import copy
+
+    from app.main import build_app, render_home
+
+    raw = copy.deepcopy(cfg.raw)
+    raw["demo"]["partner_mark"] = ""
+    blank = Config(raw, cfg.source)
+
+    masthead = _masthead_html(build_app(blank))
+    assert 'class="partner-mark"' not in masthead
+
+    home = render_home(blank)
+    assert "—  ." not in home and "— ." not in home
+    assert "fp32 (docs/AMX-FINDINGS.md)." in home
+
+
+def test_partner_mark_still_renders_when_one_is_configured(cfg):
+    """Removing the default must not delete the feature."""
+    import copy
+
+    from app.main import render_home
+
+    raw = copy.deepcopy(cfg.raw)
+    raw["demo"]["partner_mark"] = "Example strapline"
+    marked = Config(raw, cfg.source)
+
+    home = render_home(marked)
+    assert "— Example strapline." in home

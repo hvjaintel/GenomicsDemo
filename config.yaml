@@ -16,7 +16,10 @@
 demo:
   title: "Genomics on Built-In Xeon Acceleration"
   subtitle: "DeepVariant germline variant calling · Intel AMX + AVX-512"
-  partner_mark: "Intel + Kontron co-engineered"
+  # Optional strapline shown at the right of the masthead. Left empty: it is a
+  # branding line, not a measurement, and the masthead reads fine without one.
+  # Both render sites omit their surrounding punctuation when this is blank.
+  partner_mark: ""
   # Bind on all interfaces so the booth monitor / a tablet can reach it.
   host: "0.0.0.0"
   port: 7860

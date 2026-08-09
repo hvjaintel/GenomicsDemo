@@ -142,6 +142,11 @@ def render_home(cfg: Config) -> str:
         ]
     )
 
+    # A branding strapline is optional; when it is blank the sentence has to
+    # close cleanly rather than trailing an em dash into a full stop.
+    mark = str(cfg.demo.get("partner_mark", "")).strip()
+    mark_clause = f" — {escape(mark)}" if mark else ""
+
     docker_pill = (
         pill("Docker ready", "on")
         if snap.docker.reachable
@@ -167,8 +172,7 @@ def render_home(cfg: Config) -> str:
   <div style="margin-top: 22px;" class="dim">
     No add-in accelerator cards. Everything runs on the CPU's built-in vector
     units — AVX-512 for this workload; the AMX tiles are present and idle,
-    because DeepVariant's model is fp32 (docs/AMX-FINDINGS.md) —
-    {escape(str(cfg.demo.get('partner_mark', '')))}.
+    because DeepVariant's model is fp32 (docs/AMX-FINDINGS.md){mark_clause}.
   </div>
 </div>
 """
@@ -923,6 +927,13 @@ def build_app(cfg: Config) -> gr.Blocks:
         title=str(cfg.demo.get("title", "Genomics Demo")),
         analytics_enabled=False,
     ) as app:
+        partner_mark = str(cfg.demo.get("partner_mark", "")).strip()
+        # Omit the element entirely rather than leaving an empty one: the
+        # masthead is a flex row, and a blank child still takes part in its
+        # spacing.
+        mark_html = (
+            f'<div class="partner-mark">{escape(partner_mark)}</div>' if partner_mark else ""
+        )
         gr.HTML(
             f"""
 <div class="booth-masthead">
@@ -930,7 +941,7 @@ def build_app(cfg: Config) -> gr.Blocks:
     <div class="booth-title">{escape(str(cfg.demo.get('title', '')))}</div>
     <div class="booth-subtitle">{escape(str(cfg.demo.get('subtitle', '')))}</div>
   </div>
-  <div class="partner-mark">{escape(str(cfg.demo.get('partner_mark', '')))}</div>
+  {mark_html}
 </div>
 """
         )

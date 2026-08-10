@@ -284,6 +284,41 @@ def _check_storage(cfg: Config, snap: SystemSnapshot) -> Check:
     return Check("Data storage", Status.OK, f"{storage.path} — {free_gb:.0f} GB free")
 
 
+def _check_os_disk(cfg: Config) -> Check:
+    """Free space on the filesystem backing Docker.
+
+    Distinct from the data check: even with scratch and outputs on the U.2, the
+    OS disk still carries Docker's images and every container's writable layer.
+    This is the filesystem that took the demo down -- DeepVariant's per-shard
+    Bazel runfiles filled it and GNU parallel died with "Cannot append to buffer
+    file in /tmp. Is the disk full?" -- so it is worth its own line rather than
+    being inferred from a healthy-looking data volume.
+    """
+    docker_root = Path("/var/lib/docker")
+    target = docker_root if docker_root.exists() else Path("/")
+    try:
+        usage = shutil.disk_usage(target)
+    except OSError as exc:
+        return Check("OS disk", Status.WARN, f"could not read {target}: {exc}", "")
+
+    free_gb = usage.free / 1024**3
+    used_pct = 100.0 * (usage.total - usage.free) / usage.total if usage.total else 0.0
+    detail = f"{target} — {free_gb:.0f} GB free ({used_pct:.0f}% used)"
+    remedy = (
+        "Docker images and container layers live here. Reclaim with:\n"
+        "    docker image prune -a        # unused images\n"
+        "    docker system df             # what is taking the space\n"
+        "If the root LV is smaller than its volume group, extend it:\n"
+        "    sudo lvextend -l +100%FREE /dev/ubuntu-vg-1/ubuntu-lv && "
+        "sudo resize2fs /dev/ubuntu-vg-1/ubuntu-lv"
+    )
+    if free_gb < 10:
+        return Check("OS disk", Status.FAIL, detail, remedy, blocking=True)
+    if free_gb < 25:
+        return Check("OS disk", Status.WARN, detail, remedy)
+    return Check("OS disk", Status.OK, detail)
+
+
 def _check_numactl(snap: SystemSnapshot) -> Check:
     if snap.numactl_available:
         return Check("NUMA pinning", Status.OK, "numactl available on the host")
@@ -319,6 +354,7 @@ def run_preflight(cfg: Config) -> PreflightReport:
         _check_docker(snap),
         _check_image(cfg, snap),
         _check_storage(cfg, snap),
+        _check_os_disk(cfg),
         _check_reference(cfg),
         *_check_datasets(cfg),
         _check_numactl(snap),

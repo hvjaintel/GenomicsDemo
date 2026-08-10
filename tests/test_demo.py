@@ -927,3 +927,95 @@ def test_partner_mark_still_renders_when_one_is_configured(cfg):
 
     home = render_home(marked)
     assert "— Example strapline." in home
+
+
+# ---------------------------------------------------------------------------
+# Container scratch space
+# ---------------------------------------------------------------------------
+
+
+def test_container_tmp_is_mounted_off_the_os_disk(cfg):
+    """DeepVariant's scratch must not land on the container's writable layer.
+
+    run_deepvariant fans out one make_examples process per shard, and each is a
+    self-extracting Bazel binary that unpacks its runfiles into $TMPDIR. At 192
+    shards that measured 6.5 GB on the *smoke* sample -- it scales with shard
+    count, not genome size. Unmounted, that goes to /var/lib/docker on the OS
+    disk and the run dies with GNU parallel's "Cannot append to buffer file in
+    /tmp. Is the disk full?".
+    """
+    from app.runner import CONTAINER_TMP_DIR, DeepVariantRunner
+
+    runner = DeepVariantRunner(cfg)
+    spec = runner.build_spec("smoke")
+    out_dir = cfg.runs_dir / "unit-test-out"
+    cmd = runner.build_command(spec, amx_on=True, out_dir=out_dir)
+
+    scratch = DeepVariantRunner.scratch_dir(out_dir)
+    assert f"{scratch}:{CONTAINER_TMP_DIR}" in cmd
+
+    # The scratch must sit on the data volume, not inside the repo or on /.
+    assert str(scratch).startswith(str(cfg.data_root))
+    # A sibling, not a child: nesting it inside the /output bind mount would
+    # also expose it in the directory users are invited to browse.
+    assert scratch.parent == out_dir.parent
+    assert out_dir not in scratch.parents
+
+
+def test_everything_pointed_at_tmp_uses_the_mounted_path(cfg):
+    """HOME and MPLCONFIGDIR also write to /tmp; they must share the mount."""
+    from app.runner import CONTAINER_TMP_DIR, DeepVariantRunner
+
+    runner = DeepVariantRunner(cfg)
+    env = runner._env_for(amx_on=True, verbose_isa=False)
+
+    assert env["TMPDIR"] == CONTAINER_TMP_DIR
+    assert env["HOME"] == CONTAINER_TMP_DIR
+    assert env["MPLCONFIGDIR"].startswith(CONTAINER_TMP_DIR + "/")
+
+
+def test_scratch_mount_is_identical_for_both_race_legs(cfg):
+    """A race is only valid if the legs differ by the one thing under test."""
+    from app.runner import DeepVariantRunner
+
+    runner = DeepVariantRunner(cfg)
+    spec = runner.build_spec("smoke")
+    out_dir = cfg.runs_dir / "unit-test-out"
+
+    on = runner.build_command(spec, amx_on=True, out_dir=out_dir)
+    off = runner.build_command(spec, amx_on=False, out_dir=out_dir)
+
+    def mounts(cmd):
+        return [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+
+    assert mounts(on) == mounts(off)
+
+
+def test_preflight_reports_the_os_disk_separately(cfg):
+    """The data volume being healthy says nothing about the disk Docker uses."""
+    from app.preflight import run_preflight
+
+    names = [c.name for c in run_preflight(cfg).checks]
+    assert "OS disk" in names
+    assert "Data storage" in names
+
+
+def test_os_disk_check_fails_when_nearly_full(cfg, monkeypatch):
+    import shutil as _shutil
+
+    import app.preflight as P
+
+    Usage = type("Usage", (), {})
+
+    def fake_usage(path):
+        u = Usage()
+        u.total, u.free = 100 * 1024**3, 4 * 1024**3
+        u.used = u.total - u.free
+        return u
+
+    monkeypatch.setattr(P.shutil, "disk_usage", fake_usage)
+    check = P._check_os_disk(cfg)
+    assert check.status is P.Status.FAIL
+    assert check.blocking
+    assert "docker image prune" in check.remedy
+    assert _shutil is not None

@@ -240,6 +240,35 @@ The script prints the computed hashes on first download so you can paste them in
 > was repointed at a release with no `GRCh38` subdirectory. This demo pins the explicit
 > `NISTv4.2.1` release instead, which is both reachable and reproducible.
 
+### Where the scratch space goes
+
+`run_deepvariant` starts one `make_examples` process per shard, and each is a self-extracting
+Bazel binary that unpacks its runfiles tree into `$TMPDIR`. Measured on this box at
+`num_shards: 192`:
+
+| | |
+|---|---|
+| Peak scratch during `make_examples` | **6.5 GB** |
+| Files at peak | ~55,000 |
+| What it is | ~34 MB of Bazel runfiles × 192 shards, plus GNU parallel's per-job output buffers |
+
+That figure is from the **smoke** sample — 100 kb of chr20. It scales with `num_shards`, not
+with genome size, so a whole-genome run needs the same headroom for the same reason.
+
+The container's `/tmp` is therefore bind-mounted to `<data_root>/runs/<run>-tmp` on the U.2,
+and `TMPDIR`, `HOME` and `MPLCONFIGDIR` all point into it. Without that mount it lands on the
+container's writable layer — `/var/lib/docker` on the OS disk — and the run dies with:
+
+```
+parallel: Error: Cannot append to buffer file in /tmp.
+parallel: Error: Is the disk full?
+DeepVariant exited with code 255
+```
+
+The directory is deleted when the run ends. Pre-flight's **OS disk** row watches the
+filesystem behind Docker independently of the data volume, because a healthy U.2 says nothing
+about the disk holding the images.
+
 ---
 
 ## Booth-day runbook
@@ -283,7 +312,8 @@ Nothing to reset. Press the button again — each run writes to its own director
 | Docker died | `sudo systemctl restart docker`, then re-run. |
 | UI unresponsive | Ctrl-C, then `./run_demo.sh --skip-checks` (~2 s restart). |
 | Hardware unavailable entirely | Set `demo_mode.policy: always` in `config.yaml` to replay a recorded run. The replay banner makes this obvious to the audience. |
-| Disk filling up | `rm -rf <data_root>/runs/*` — run outputs only, never the staged inputs. |
+| Disk filling up | `rm -rf <data_root>/runs/*` — run outputs and scratch only, never the staged inputs. |
+| `parallel: Cannot append to buffer file in /tmp. Is the disk full?` | The container's scratch is not landing on the data volume. Check the `docker run` line on screen for a `-v .../runs/<run>-tmp:/tmp` mount, and check pre-flight's **OS disk** row. See "Where the scratch space goes" below. |
 
 ### End of day
 

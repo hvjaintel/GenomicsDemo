@@ -46,6 +46,14 @@ from .parsing import (
 CONTAINER_REF_DIR = "/ref"
 CONTAINER_IN_DIR = "/input"
 CONTAINER_OUT_DIR = "/output"
+# GNU parallel buffers every shard's stdout under $TMPDIR, and run_deepvariant
+# fans out to one job per shard. Left alone that lands on the container's
+# writable layer -- i.e. /var/lib/docker on the OS disk -- and a whole-genome
+# run at 192 shards fills it, killing the run with:
+#     parallel: Error: Cannot append to buffer file in /tmp. Is the disk full?
+# Scratch belongs on the same large volume as the data, so /tmp is bind-mounted
+# out of the container.
+CONTAINER_TMP_DIR = "/tmp"
 # Read-only mount point for app/container_inject, which carries the
 # sitecustomize.py that switches DeepVariant's inference to bf16.
 CONTAINER_INJECT_DIR = "/genomics-demo-inject"
@@ -258,8 +266,12 @@ class DeepVariantRunner:
             # inside it, so matplotlib fails to build its font cache and prints
             # a multi-line warning per shard. With 192 shards that buries the
             # booth log. Identical for both legs, so it changes no timing.
-            "MPLCONFIGDIR": "/tmp/matplotlib",
-            "HOME": "/tmp",
+            "MPLCONFIGDIR": f"{CONTAINER_TMP_DIR}/matplotlib",
+            "HOME": CONTAINER_TMP_DIR,
+            # Stated rather than left to default so the scratch location is
+            # visible in the command line the app puts on screen. All three of
+            # these land on the host volume via the CONTAINER_TMP_DIR mount.
+            "TMPDIR": CONTAINER_TMP_DIR,
         }
         if verbose_isa and self.cfg.amx.get("verify_isa_from_logs", True):
             verbose = str(self.cfg.amx.get("onednn_verbose", 1))
@@ -294,6 +306,17 @@ class DeepVariantRunner:
             ]
         return []
 
+    @staticmethod
+    def scratch_dir(out_dir: Path) -> Path:
+        """Host directory backing the container's /tmp for one run.
+
+        A sibling of the run directory rather than a child, so it is not nested
+        inside another bind mount and does not appear under the output the user
+        is invited to browse. It still sits under runs/, so the runbook's
+        `rm -rf <data_root>/runs/*` continues to clear everything a run made.
+        """
+        return out_dir.parent / f"{out_dir.name}-tmp"
+
     def build_command(
         self, spec: RunSpec, amx_on: bool, out_dir: Path, verbose_isa: bool = True
     ) -> list[str]:
@@ -307,6 +330,9 @@ class DeepVariantRunner:
             "-v", f"{spec.reference.parent}:{CONTAINER_REF_DIR}:ro",
             "-v", f"{spec.bam.parent}:{CONTAINER_IN_DIR}:ro",
             "-v", f"{out_dir}:{CONTAINER_OUT_DIR}",
+            # Keep GNU parallel's per-shard buffers off the OS disk. See
+            # CONTAINER_TMP_DIR.
+            "-v", f"{self.scratch_dir(out_dir)}:{CONTAINER_TMP_DIR}",
         ]
         if self.cfg.amx.get("use_bf16_injection", True):
             # Mounted for BOTH legs, identically. Only DV_FORCE_BF16 differs,
@@ -427,6 +453,12 @@ class DeepVariantRunner:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "intermediate").mkdir(exist_ok=True)
 
+        # Must exist before docker run: Docker creates a missing bind-mount
+        # source itself, owned by root, and the container runs as the host UID
+        # -- so parallel would find /tmp unwritable instead of merely full.
+        scratch = self.scratch_dir(out_dir)
+        scratch.mkdir(parents=True, exist_ok=True)
+
         requested_isa = self.cfg.isa_for(amx_on)
         cmd = self.build_command(spec, amx_on, out_dir, verbose_isa)
         self._active_container = self._container_name(out_dir.name, amx_on)
@@ -470,6 +502,7 @@ class DeepVariantRunner:
             result.error = f"could not launch Docker: {exc}"
             result.exit_code = -1
             result.finished_at = time.time()
+            shutil.rmtree(scratch, ignore_errors=True)
             yield RunEvent(kind="done", run_id=run_id, amx_on=amx_on, result=result)
             return
 
@@ -531,6 +564,11 @@ class DeepVariantRunner:
 
         end = time.time()
         parser.finalize(end)
+        # Scratch is worthless once the container is gone -- it holds GNU
+        # parallel's output buffers -- and on a whole genome it is large. Left
+        # behind, successive runs would reproduce the very disk-full failure
+        # this directory exists to prevent.
+        shutil.rmtree(scratch, ignore_errors=True)
         result.finished_at = end
         result.exit_code = proc.returncode
         result.reported_isa = parser.reported_isa

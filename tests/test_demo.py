@@ -1019,3 +1019,43 @@ def test_os_disk_check_fails_when_nearly_full(cfg, monkeypatch):
     assert check.blocking
     assert "docker image prune" in check.remedy
     assert _shutil is not None
+
+
+@pytest.mark.parametrize(
+    "mapper_name,expected",
+    [
+        # This machine: group "ubuntu-vg-1", LV "ubuntu-lv". Splitting on "-"
+        # before unescaping would yield the group "ubuntu" and a wrong device.
+        ("ubuntu--vg--1-ubuntu--lv", ("ubuntu-vg-1", "ubuntu-lv")),
+        # The idle install on the other NVMe -- one character apart from above.
+        ("ubuntu--vg-ubuntu--lv", ("ubuntu-vg", "ubuntu-lv")),
+        ("vg0-root", ("vg0", "root")),
+    ],
+)
+def test_lv_hint_unescapes_device_mapper_names(monkeypatch, mapper_name, expected):
+    """Pointing booth staff at the wrong volume group is worse than no hint."""
+    import subprocess as _sp
+
+    import app.preflight as P
+
+    def fake_run(*args, **kwargs):
+        return _sp.CompletedProcess(args, 0, stdout=f"/dev/mapper/{mapper_name}\n", stderr="")
+
+    monkeypatch.setattr(P.subprocess, "run", fake_run)
+    hint = P._lv_extend_hint()
+    vg, lv = expected
+    assert f"/dev/{vg}/{lv}" in hint
+    assert f"sudo vgs {vg}" in hint
+
+
+def test_lv_hint_is_silent_when_root_is_not_lvm(monkeypatch):
+    """No LVM, no advice -- rather than advice that cannot work."""
+    import subprocess as _sp
+
+    import app.preflight as P
+
+    monkeypatch.setattr(
+        P.subprocess, "run",
+        lambda *a, **k: _sp.CompletedProcess(a, 0, stdout="/dev/nvme0n1p2\n", stderr=""),
+    )
+    assert P._lv_extend_hint() == ""

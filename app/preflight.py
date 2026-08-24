@@ -284,6 +284,41 @@ def _check_storage(cfg: Config, snap: SystemSnapshot) -> Check:
     return Check("Data storage", Status.OK, f"{storage.path} — {free_gb:.0f} GB free")
 
 
+def _lv_extend_hint() -> str:
+    """Suggest extending the root LV, naming the device actually in use.
+
+    The volume group name is read from the live mount rather than written into
+    the source. This box has two similarly named groups -- ubuntu-vg-1 backs the
+    running system, ubuntu-vg belongs to an idle install on the other NVMe --
+    and a hardcoded hint is one transcription slip away from pointing booth
+    staff at the wrong one.
+    """
+    try:
+        source = subprocess.run(
+            ["findmnt", "-no", "SOURCE", "/"],
+            capture_output=True, text=True, check=False, timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not source.startswith("/dev/mapper/"):
+        return ""
+
+    # Device-mapper escapes a literal hyphen by doubling it, so unescaping has
+    # to happen before the vg-lv split or "ubuntu--vg--1-ubuntu--lv" parses as
+    # the group "ubuntu".
+    name = source.split("/dev/mapper/", 1)[1]
+    parts = [p.replace("\0", "-") for p in name.replace("--", "\0").split("-")]
+    if len(parts) != 2:
+        return ""
+    vg, lv = parts
+    return (
+        f"\nIf the root LV is smaller than its volume group, extend it "
+        f"(online, no reboot):\n"
+        f"    sudo vgs {vg}                       # confirm VFree first\n"
+        f"    sudo lvextend -r -l +100%FREE /dev/{vg}/{lv}"
+    )
+
+
 def _check_os_disk(cfg: Config) -> Check:
     """Free space on the filesystem backing Docker.
 
@@ -306,11 +341,9 @@ def _check_os_disk(cfg: Config) -> Check:
     detail = f"{target} — {free_gb:.0f} GB free ({used_pct:.0f}% used)"
     remedy = (
         "Docker images and container layers live here. Reclaim with:\n"
-        "    docker image prune -a        # unused images\n"
         "    docker system df             # what is taking the space\n"
-        "If the root LV is smaller than its volume group, extend it:\n"
-        "    sudo lvextend -l +100%FREE /dev/ubuntu-vg-1/ubuntu-lv && "
-        "sudo resize2fs /dev/ubuntu-vg-1/ubuntu-lv"
+        "    docker image prune -a        # unused images\n"
+        f"{_lv_extend_hint()}"
     )
     if free_gb < 10:
         return Check("OS disk", Status.FAIL, detail, remedy, blocking=True)

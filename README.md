@@ -190,6 +190,34 @@ sudo sed -i "s|^UUID=<uuid> /mnt/nvme2n1 .*$|UUID=$(sudo blkid -s UUID -o value 
 `nofail` matters: without it, a missing data disk drops the machine to an emergency
 shell at boot rather than starting normally.
 
+### Giving the OS disk its real capacity
+
+Separate problem from the data mount, and the one that actually killed a run: the
+data disk can report terabytes free while `/` is nearly full. Docker images, container
+writable layers and DeepVariant's scratch all land on `/`, so pre-flight checks
+`/var/lib/docker` independently of the data root.
+
+On this bench the root logical volume was **100 GiB carved out of a 3,573 GiB volume
+group** — about 3.4 TB sat unallocated while `/` ran at 86%. Extending is online and
+needs no reboot:
+
+```bash
+sudo vgs                                    # read VFree for yourself first
+sudo lvextend -r -l +100%FREE /dev/ubuntu-vg-1/ubuntu-lv
+df -h /                                     # confirm the new size
+```
+
+`-r` grows the ext4 filesystem in the same step, so there is no window where the
+volume is larger than the filesystem on it.
+
+**Check the volume group name against your own `vgs` output rather than trusting the
+line above.** This machine has two groups one character apart — `ubuntu-vg-1` backs
+the running system, `ubuntu-vg` belongs to a dormant install on the other NVMe. The
+pre-flight remedy text derives the right name from the live mount for this reason.
+To leave room for LVM snapshots, use `-L +500G` instead of `-l +100%FREE`.
+
+Restart the app afterwards: it resolves paths once at startup.
+
 If a reboot has already dropped the mount, nothing is lost — just remount:
 
 ```bash

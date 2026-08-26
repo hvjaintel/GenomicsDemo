@@ -1214,3 +1214,121 @@ def test_smoke_and_tco_remain_marked_illustrative():
     smoke = next(s for s in cfg.samples if s.id == "smoke")
     assert smoke.illustrative is True
     assert cfg.tco.get("illustrative") is True
+
+
+# --------------------------------------------------------------------------
+# Offline capability. The booth machine may sit on a hostile network or none.
+# --------------------------------------------------------------------------
+
+def test_bundled_font_files_are_present_and_valid_woff2():
+    """A truncated or missing font silently degrades the booth screen."""
+    from app.theme import BUNDLED_FONTS, FONT_DIR
+
+    for _family, filename, _weights in BUNDLED_FONTS:
+        path = FONT_DIR / filename
+        assert path.exists(), f"{filename} is missing from {FONT_DIR}"
+        blob = path.read_bytes()
+        assert blob[:4] == b"wOF2", f"{filename} is not a woff2 file"
+        assert len(blob) > 10_000, f"{filename} looks truncated ({len(blob)} bytes)"
+
+
+def test_font_licences_ship_alongside_the_binaries():
+    """Both faces are OFL; redistribution requires the licence to travel with them."""
+    from app.theme import FONT_DIR
+
+    for name in ("Inter-OFL.txt", "JetBrainsMono-OFL.txt"):
+        text = (FONT_DIR / name).read_text(encoding="utf-8", errors="replace")
+        assert "SIL OPEN FONT LICENSE" in text.upper()
+
+
+def test_font_faces_are_inlined_not_fetched():
+    from app.theme import font_face_css
+
+    css = font_face_css()
+    assert css.count("@font-face") == 2
+    assert "data:font/woff2;base64," in css
+    assert "http://" not in css and "https://" not in css
+
+
+def test_stylesheet_contains_no_outbound_urls():
+    """The regression guard: any http(s) URL in our CSS is a network dependency.
+
+    The demo previously pulled Inter and JetBrains Mono from fonts.googleapis.com
+    via a render-blocking <link>. With no network that fails fast, but on venue
+    wi-fi that accepts the connection and then stalls it can hold the booth
+    screen blank for seconds.
+    """
+    from app.config import Config
+    from app.theme import build_css
+
+    css = build_css(Config.load())
+    assert "http://" not in css
+    assert "https://" not in css
+    assert "googleapis" not in css and "gstatic" not in css
+
+
+def test_theme_requests_no_cdn_stylesheets():
+    """gr.themes.GoogleFont is what injects the render-blocking <link>.
+
+    Asserting on theme.font is useless -- Gradio flattens it to the CSS string
+    "\'Inter\', \'system-ui\', sans-serif" and the font objects are gone. The
+    surviving evidence is Font.stylesheet(), which returns a fonts.googleapis.com
+    URL for GoogleFont and None for a plain Font, and the _stylesheets list those
+    URLs are collected into. An earlier version of this test checked isinstance
+    against theme.font and passed happily with GoogleFont restored.
+    """
+    from app.config import Config
+    from app.theme import build_theme
+
+    theme = build_theme(Config.load())
+
+    assert list(getattr(theme, "_stylesheets", [])) == [], (
+        "the theme pulls a stylesheet from a CDN"
+    )
+    for attr in ("_font", "_font_mono"):
+        for entry in getattr(theme, attr, ()) or ():
+            sheet = entry.stylesheet() if hasattr(entry, "stylesheet") else None
+            assert sheet is None, f"{attr} entry {entry!r} fetches {sheet}"
+
+
+def test_font_face_css_survives_a_missing_font_file(monkeypatch, tmp_path):
+    """A booth screen in the wrong typeface still runs; one that won't start doesn't."""
+    import app.theme as T
+
+    T.font_face_css.cache_clear()
+    monkeypatch.setattr(T, "FONT_DIR", tmp_path)
+    try:
+        assert T.font_face_css() == ""
+    finally:
+        T.font_face_css.cache_clear()
+
+
+def test_served_page_has_no_render_blocking_external_resources():
+    """End-to-end guard against the served HTML, not just our own CSS.
+
+    Skipped when the demo is not running. Gradio's own template emits two
+    preconnect hints and one `async` script from cdnjs; neither blocks parsing
+    or rendering, so those are tolerated. What must never come back is a
+    synchronous stylesheet or script from a third-party host, because that is
+    what can hold the booth screen blank on a stalled venue network.
+    """
+    import re
+    import urllib.error
+    import urllib.request
+
+    try:
+        html = urllib.request.urlopen("http://127.0.0.1:7860/", timeout=5).read().decode(
+            "utf-8", errors="replace"
+        )
+    except (urllib.error.URLError, OSError):
+        pytest.skip("demo not running on :7860")
+
+    assert "css2?family=" not in html, "a Google Fonts stylesheet link is back"
+
+    for tag in re.findall(r"<link[^>]*>", html):
+        if "stylesheet" in tag and re.search(r'href="https?://', tag):
+            raise AssertionError(f"external stylesheet: {' '.join(tag.split())}")
+
+    for tag in re.findall(r"<script[^>]*>", html):
+        if re.search(r'src="https?://', tag) and not re.search(r"\basync\b|\bdefer\b", tag):
+            raise AssertionError(f"blocking external script: {' '.join(tag.split())}")

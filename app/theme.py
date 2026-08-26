@@ -8,9 +8,53 @@ the work here is overriding them.
 
 from __future__ import annotations
 
+import base64
+import functools
+from pathlib import Path
+
 import gradio as gr
 
 from .config import Config
+
+FONT_DIR = Path(__file__).parent / "static" / "fonts"
+
+# (family, filename, css weight range). Both files are variable fonts, so one
+# binary covers every weight we use -- Google serves the same file for 400 and
+# 600, which is why bundling per-weight copies would just be the same bytes
+# twice.
+BUNDLED_FONTS = (
+    ("Inter", "Inter-var.woff2", "100 900"),
+    ("JetBrains Mono", "JetBrainsMono-var.woff2", "100 800"),
+)
+
+
+@functools.lru_cache(maxsize=1)
+def font_face_css() -> str:
+    """@font-face rules with the fonts inlined as data URIs.
+
+    Inlining rather than serving from a static route is deliberate. A booth
+    machine may be on a hostile network or none at all, and a data URI cannot
+    fail to resolve, cannot be blocked, and does not depend on Gradio's
+    file-serving paths staying put across versions. The cost is ~79 KB added to
+    a page that is only ever loaded on the local machine.
+
+    A missing font file degrades to the system stack rather than raising -- a
+    booth screen with the wrong typeface still runs the demo, whereas one that
+    will not start does not.
+    """
+    rules = []
+    for family, filename, weight_range in BUNDLED_FONTS:
+        path = FONT_DIR / filename
+        try:
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError:
+            continue
+        rules.append(
+            f"@font-face{{font-family:'{family}';font-style:normal;"
+            f"font-weight:{weight_range};font-display:swap;"
+            f"src:url(data:font/woff2;base64,{encoded}) format('woff2');}}"
+        )
+    return "\n".join(rules)
 
 
 def build_theme(cfg: Config) -> gr.Theme:
@@ -19,8 +63,13 @@ def build_theme(cfg: Config) -> gr.Theme:
         primary_hue=gr.themes.colors.blue,
         secondary_hue=gr.themes.colors.sky,
         neutral_hue=gr.themes.colors.slate,
-        font=[gr.themes.GoogleFont("Inter"), "system-ui", "sans-serif"],
-        font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "monospace"],
+        # Plain Font, not GoogleFont: GoogleFont injects a <link> to
+        # fonts.googleapis.com, which is render-blocking. With no network that
+        # fails fast, but on conference wi-fi that accepts the connection and
+        # then stalls, it can hold the booth screen blank for seconds. The
+        # families are supplied by font_face_css() instead.
+        font=[gr.themes.Font("Inter"), "system-ui", "sans-serif"],
+        font_mono=[gr.themes.Font("JetBrains Mono"), "monospace"],
     ).set(
         body_background_fill="#0A0E14",
         body_background_fill_dark="#0A0E14",
@@ -101,6 +150,7 @@ def build_css(cfg: Config) -> str:
     accent_bright = cfg.demo.get("theme_accent_bright", "#00C7FD")
     badge_start = cfg.demo.get("theme_badge_start", "#00AEEF")
     return f"""
+{font_face_css()}
 :root {{
   --intel-blue: {accent};
   --intel-bright: {accent_bright};

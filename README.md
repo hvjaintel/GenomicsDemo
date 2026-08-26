@@ -494,6 +494,37 @@ docker load < deepvariant-image.tar.gz
 ./run_demo.sh --offline
 ```
 
+### Verified, not assumed
+
+The pipeline was run with the container's network switched off entirely:
+
+```bash
+docker run --rm --network none ... google/deepvariant:1.10.0 run_deepvariant ...
+```
+
+Exit code 0, **313 variants** — the known-good count for that sample — and zero
+network, DNS or timeout messages in the log. Nothing in the workload phones home:
+the image is local, the model checkpoint ships inside it, and the reference and BAM
+are on the NVMe. The URLs in `config.yaml` are download sources for `fetch_data.sh`
+and are read only during staging.
+
+### Fonts are bundled, and why that matters
+
+The UI's typefaces (Inter, JetBrains Mono — both OFL, bundled under
+`app/static/fonts/` with their licences) are inlined into the stylesheet as data
+URIs rather than fetched from `fonts.googleapis.com`.
+
+No network is the *easy* case: DNS fails fast and `font-display: swap` paints text
+immediately in the fallback. The dangerous case is venue wi-fi that accepts the TCP
+connection and then stalls, because the Google Fonts `<link>` is **render-blocking**
+— the booth screen can sit blank for seconds. A data URI cannot stall.
+
+What remains in Gradio's own template is two `preconnect` hints and one `async`
+script from cdnjs (an iframe helper, unused outside an iframe). None of the three
+blocks parsing or rendering, and the page is fully functional without them.
+`test_served_page_has_no_render_blocking_external_resources` fails if a synchronous
+external stylesheet or script ever reappears.
+
 ---
 
 ## Tests

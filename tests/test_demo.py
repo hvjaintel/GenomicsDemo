@@ -1178,3 +1178,39 @@ def test_baseline_cpuset_is_readable_from_config():
     if baseline is None:
         baseline = (cfg.raw.get("scaling") or {}).get("baseline_cpuset")
     assert baseline, "scaling.baseline_cpuset must resolve, or pinned runs lose their estimate"
+
+
+def test_wgs_runtimes_are_measured_not_illustrative():
+    """Both WGS legs have now been run end to end on this box.
+
+    Guards the pair: flipping illustrative to false while leaving a placeholder
+    runtime in place would present an estimate as a measurement, which is the
+    one thing this demo must not do.
+    """
+    from app.config import Config
+
+    sample = next(s for s in Config.load().samples if s.id == "wgs")
+    assert sample.illustrative is False
+    assert sample.runtime_fast_s == 1547, "all-192-thread run, measured twice"
+    assert sample.runtime_slow_s == 7491, "16-core run, measured 2026-08-26"
+
+
+def test_wgs_dataset_panel_claims_measurement_not_estimation():
+    from app.config import Config
+    import app.main as main
+
+    cfg = Config.load()
+    html = main.render_dataset(cfg, "wgs")
+    assert "measured on this box" in html
+    assert "estimate — for pacing only" not in html
+    assert "Illustrative" not in html
+
+
+def test_smoke_and_tco_remain_marked_illustrative():
+    """Those figures really are assumptions; the label must survive this change."""
+    from app.config import Config
+
+    cfg = Config.load()
+    smoke = next(s for s in cfg.samples if s.id == "smoke")
+    assert smoke.illustrative is True
+    assert cfg.tco.get("illustrative") is True

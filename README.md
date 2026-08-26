@@ -121,6 +121,32 @@ HG002, 35x, GRCh38, DeepVariant 1.10.0, all 192 threads, 192 shards:
 7,709,239 variants called. For scale, Google's own published figure for the same
 version is 69 minutes on a 96-vCPU cloud instance.
 
+Re-run after the scratch-space fix: **25m 46s**. Two runs one second apart.
+
+### Measured core scaling
+
+The same genome pinned to 16 of the 96 physical cores (`--cores 0-15`):
+
+| Stage | 192 threads | 16 cores |
+|---|---|---|
+| `make_examples` | 13m 52s | 1h 26m 40s |
+| `call_variants` | 11m 01s | 33m 58s |
+| `postprocess_variants` | 50s | 4m 10s |
+| **Total** | **25m 46s** | **2h 04m 51s** |
+
+**4.85x**, measured end to end — not extrapolated. Both runs are in the repo's
+result-JSON format and each records its own `docker run` line, so the pinning that
+produced a number is recoverable from the number's own file.
+
+The result that matters more than the ratio: the two runs produced **byte-identical
+output** — 7,709,239 variants, 6,443,505 SNPs, 1,265,734 indels, 4,842,559 passing,
+down to identical QUAL values on the first variant of chr1. Core count changed the
+wall clock and nothing else.
+
+Scaling is sublinear (4.85x from 6x the cores, 12x the threads) because
+`make_examples` is I/O- and Python-bound and half the 192 are SMT siblings rather
+than cores. The demo says so rather than rounding it up to "12x".
+
 ---
 
 ## Prerequisites

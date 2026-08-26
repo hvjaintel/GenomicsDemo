@@ -348,18 +348,25 @@ samples:
     # runtime_fast_s is MEASURED on this box: 25m 47s (1547 s) on all 192
     # threads, 192 shards, DeepVariant 1.10.0, 7,709,239 variants.
     #   make_examples 13m50s | call_variants 11m05s | postprocess 49s
+    # Re-measured after the scratch-space fix: 1546 s. Two runs one second
+    # apart, so treat 1547 as solid rather than lucky.
     # For reference, Google publish 69 min for 1.10 on a 96-vCPU n2-standard-96.
     #
     # Note this beat the estimate scaled from chr20 (~46 min) by a wide margin:
     # a whole genome offers far more independent work than a single contig, so
     # chr20 UNDERSTATES whole-genome scaling. Do not extrapolate the other way.
     #
-    # runtime_slow_s (16-core leg) is still an estimate -- that run was launched
-    # but the box rebooted before it finished. Since `illustrative` governs both
-    # numbers, it stays true until the baseline is measured too.
+    # runtime_slow_s is now MEASURED too: 2h 04m 51s (7491 s) pinned to
+    # scaling.baseline_cpuset "0-15" -- 16 of the 96 physical cores.
+    #   make_examples 1h26m40s | call_variants 33m58s | postprocess 4m10s
+    # That is 4.85x, against a previous estimate of 9000 s which ran ~20% high.
+    #
+    # Both runs produced byte-identical output: 7,709,239 variants, 6,443,505
+    # SNPs, 1,265,734 indels, 4,842,559 passing. Core count changed the wall
+    # clock and nothing else, which is the point worth making at the booth.
     runtime_fast_s: 1547
-    runtime_slow_s: 9000
-    illustrative: true
+    runtime_slow_s: 7491
+    illustrative: false
     show_in_booth: true
 
 # -----------------------------------------------------------------------------

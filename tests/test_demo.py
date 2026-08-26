@@ -1059,3 +1059,72 @@ def test_lv_hint_is_silent_when_root_is_not_lvm(monkeypatch):
         lambda *a, **k: _sp.CompletedProcess(a, 0, stdout="/dev/nvme0n1p2\n", stderr=""),
     )
     assert P._lv_extend_hint() == ""
+
+
+def test_active_stage_picks_the_running_one():
+    from app.run import _active_stage
+
+    stages = {
+        "make_examples": {"label": "Make examples", "started": True, "finished": True},
+        "call_variants": {"label": "Call variants", "started": True, "finished": False},
+        "postprocess_variants": {"label": "Postprocess", "started": False, "finished": False},
+    }
+    assert _active_stage(stages) == "Call variants"
+
+
+def test_active_stage_is_none_before_any_stage_is_known():
+    """Better to say nothing than to name a stage that has not started."""
+    from app.run import _active_stage
+
+    stages = {
+        name: {"label": name, "started": False, "finished": False}
+        for name in ("make_examples", "call_variants", "postprocess_variants")
+    }
+    assert _active_stage(stages) is None
+
+
+def test_active_stage_ignores_payload_key_order():
+    """event.stages is a plain dict; correctness must not rest on its ordering."""
+    from app.run import _active_stage
+
+    reversed_payload = {
+        "postprocess_variants": {"label": "Postprocess", "started": False, "finished": False},
+        "call_variants": {"label": "Call variants", "started": True, "finished": False},
+        "make_examples": {"label": "Make examples", "started": True, "finished": True},
+    }
+    assert _active_stage(reversed_payload) == "Call variants"
+
+
+def test_make_examples_reports_liveness_without_a_percentage():
+    """The bug this guards: a WGS run sat at "0.0%" for ~14 minutes.
+
+    make_examples never prints a percentage, so the CLI's only progress signal
+    stayed at zero for the longest stage of the run -- indistinguishable from a
+    hung job on a booth terminal.
+    """
+    from app.parsing import LogParser
+
+    parser = LogParser()
+    # The real banner run_deepvariant prints when it launches the stage.
+    parser.feed("***** Running the command:*****", 0.0)
+    parser.feed(
+        'time seq 0 191 | parallel -q --halt 2 --line-buffer '
+        '/opt/deepvariant/bin/make_examples --mode calling --task {}',
+        0.1,
+    )
+    # ...and a real progress line from a live whole-genome run. Note it carries
+    # no percentage, only a per-shard candidate count.
+    parser.feed(
+        "I0826 16:50:06.572551 1 make_examples_core.py:384] "
+        "Task 82/192: 16002 candidates (4239 examples) [37.24s elapsed]",
+        1.0,
+    )
+    assert parser.overall_percent == 0.0, "precondition: no percentage is available"
+
+    from app.run import _active_stage
+    from app.runner import DeepVariantRunner
+
+    stages = DeepVariantRunner._stage_payload(parser)
+    assert _active_stage(stages) is not None, (
+        "with no percentage to show, the running stage is the only honest signal"
+    )

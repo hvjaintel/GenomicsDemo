@@ -20,7 +20,29 @@ import time
 from pathlib import Path
 
 from .config import Config
+from .parsing import STAGES
 from .runner import DeepVariantRunner, RunResult, time_ratio
+
+# How often to reassure the operator the run is alive when no percentage is
+# available. Long enough not to scroll a booth terminal, short enough that
+# nobody reaches for Ctrl-C.
+PROGRESS_EVERY_S = 15.0
+
+
+def _active_stage(stages: dict[str, dict]) -> str | None:
+    """Label of the stage currently running, or None if that is not yet known.
+
+    Stages start in order, so the running one is the last that has begun and
+    not finished. Iterate STAGES rather than the dict so this does not quietly
+    depend on the payload's key order. Returning None rather than a guess keeps
+    the caller honest when the log has not revealed a stage yet.
+    """
+    active = None
+    for name in STAGES:
+        payload = stages.get(name) or {}
+        if payload.get("started") and not payload.get("finished"):
+            active = payload.get("label") or name
+    return active
 
 
 def _fmt_hms(seconds: float | None) -> str:
@@ -151,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.time()
     result: RunResult | None = None
     last_pct = -1.0
+    last_print = 0.0
     for event in runner.run(
         spec,
         amx_on=args.amx,
@@ -161,11 +184,22 @@ def main(argv: list[str] | None = None) -> int:
         if event.kind == "log" and not args.quiet:
             print(event.line, flush=True)
         elif event.kind == "heartbeat":
+            now = time.time()
             pct = event.overall_percent
-            if pct - last_pct >= 1.0:
-                last_pct = pct
-                elapsed = _fmt_hms(time.time() - started)
-                print(f"  [{pct:5.1f}%]  {elapsed} elapsed", flush=True)
+            advanced = pct - last_pct >= 1.0
+            # make_examples emits no percentage at all, and it is the longest
+            # stage of a whole-genome run. Reporting a frozen "0.0%" for a
+            # quarter of an hour reads as a hung job, so fall back to naming
+            # the running stage -- which is a fact we actually have -- rather
+            # than inventing a number we do not.
+            if advanced or now - last_print >= PROGRESS_EVERY_S:
+                last_pct = max(last_pct, pct)
+                last_print = now
+                elapsed = _fmt_hms(now - started)
+                stage = _active_stage(event.stages)
+                head = f"[{pct:5.1f}%]" if pct > 0 else "[ working ]"
+                where = f"  {stage}" if stage else ""
+                print(f"  {head}{where}  {elapsed} elapsed", flush=True)
         if event.result is not None:
             result = event.result
 

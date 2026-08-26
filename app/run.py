@@ -29,6 +29,28 @@ from .runner import DeepVariantRunner, RunResult, time_ratio
 PROGRESS_EVERY_S = 15.0
 
 
+def _expected_runtime(sample, cfg, cores: str | None) -> tuple[float | None, str]:
+    """Pick the recorded runtime that matches how this run is actually pinned.
+
+    Returns (seconds, qualifier). Seconds is None when nothing on file applies,
+    which is the honest answer for an arbitrary cpuset -- better than quoting a
+    figure recorded under different conditions.
+    """
+    illustrative = getattr(sample, "illustrative", False)
+    if not cores:
+        return sample.runtime_fast_s, "estimate" if illustrative else "measured previously"
+
+    baseline = getattr(getattr(cfg, "scaling", None), "baseline_cpuset", None)
+    if baseline is None:
+        baseline = (cfg.raw.get("scaling") or {}).get("baseline_cpuset")
+    if baseline and cores == baseline:
+        slow = sample.runtime_slow_s
+        if slow:
+            label = "estimate" if illustrative else "measured previously"
+            return slow, f"{label}, {cores}"
+    return None, ""
+
+
 def _active_stage(stages: dict[str, dict]) -> str | None:
     """Label of the stage currently running, or None if that is not yet known.
 
@@ -164,10 +186,18 @@ def main(argv: list[str] | None = None) -> int:
 
     # A whole-genome run is hours long. Say so before it starts, using the
     # estimate in config.yaml, and be explicit that it is only an estimate.
-    est = sample.runtime_fast_s
+    #
+    # runtime_fast_s describes an all-core run. Quoting it while pinned to a
+    # subset would promise 25 minutes for a job that takes hours, so only use
+    # it when the run really is unpinned, and reach for the baseline figure
+    # when the cpuset is the one that number was recorded on.
+    est, qualifier = _expected_runtime(sample, cfg, args.cores)
     if est:
-        qualifier = "estimate" if sample.illustrative else "measured previously"
         print(f"\nExpected   : ~{_fmt_hms(est)} ({qualifier})")
+    elif args.cores:
+        print(
+            f"\nExpected   : unknown — no recorded time for cpuset '{args.cores}'"
+        )
 
     print("\n" + "=" * 70)
     started = time.time()

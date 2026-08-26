@@ -1128,3 +1128,53 @@ def test_make_examples_reports_liveness_without_a_percentage():
     assert _active_stage(stages) is not None, (
         "with no percentage to show, the running stage is the only honest signal"
     )
+
+
+def _wgs_sample(cfg):
+    return next(s for s in cfg.samples if s.id == "wgs")
+
+
+def test_expected_runtime_uses_the_all_core_figure_when_unpinned():
+    from app.config import Config
+    from app.run import _expected_runtime
+
+    cfg = Config.load()
+    est, _ = _expected_runtime(_wgs_sample(cfg), cfg, None)
+    assert est == _wgs_sample(cfg).runtime_fast_s
+
+
+def test_expected_runtime_does_not_quote_all_core_time_for_a_pinned_run():
+    """The bug: launching the 16-core baseline announced '~25m 47s'.
+
+    That is the all-core measurement, for a run that takes hours. An operator
+    reading it would conclude the job had hung long before it was halfway.
+    """
+    from app.config import Config
+    from app.run import _expected_runtime
+
+    cfg = Config.load()
+    sample = _wgs_sample(cfg)
+    est, _ = _expected_runtime(sample, cfg, "0-15")
+    assert est != sample.runtime_fast_s
+    assert est == sample.runtime_slow_s
+
+
+def test_expected_runtime_is_unknown_for_an_unrecorded_cpuset():
+    """No figure on file beats a figure recorded under other conditions."""
+    from app.config import Config
+    from app.run import _expected_runtime
+
+    cfg = Config.load()
+    est, _ = _expected_runtime(_wgs_sample(cfg), cfg, "0-31")
+    assert est is None
+
+
+def test_baseline_cpuset_is_readable_from_config():
+    """_expected_runtime silently returns None if this key ever moves."""
+    from app.config import Config
+
+    cfg = Config.load()
+    baseline = getattr(getattr(cfg, "scaling", None), "baseline_cpuset", None)
+    if baseline is None:
+        baseline = (cfg.raw.get("scaling") or {}).get("baseline_cpuset")
+    assert baseline, "scaling.baseline_cpuset must resolve, or pinned runs lose their estimate"

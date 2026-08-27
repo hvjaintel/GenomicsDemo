@@ -107,7 +107,8 @@ alone is 46 GB. See "Persisting the data mount" below.
 
 ### Measured whole-genome run
 
-HG002, 35x, GRCh38, DeepVariant 1.10.0, all 192 threads, 192 shards:
+HG002, 35x, GRCh38, DeepVariant 1.10.0, all 192 threads, 192 shards. (This is the
+whole-machine run including SMT; the core-to-core race figures are below.)
 
 | Stage | Time |
 |---|---|
@@ -139,16 +140,16 @@ An earlier version of this race put 16 cores against all 192 *threads* and repor
 credit cores for a win that was partly hyperthreading. The honest core-to-core figure
 is **lower**, and it is the one we quote.
 
-**Whole genome, 16 cores vs 192 threads** (historical; includes SMT on the fast leg):
+**Whole genome, core to core** — all three legs measured on this box:
 
-| Stage | 192 threads | 16 cores |
+| Stage | 96 cores (`0-95`) | 16 cores (`0-15`) |
 |---|---|---|
-| `make_examples` | 13m 52s | 1h 26m 40s |
-| `call_variants` | 11m 01s | 33m 58s |
-| `postprocess_variants` | 50s | 4m 10s |
-| **Total** | **25m 46s** | **2h 04m 51s** |
+| `make_examples` | 17m 37s | 1h 26m 40s |
+| `call_variants` | 14m 20s | 33m 58s |
+| `postprocess_variants` | 59s | 4m 10s |
+| **Total** | **32m 59s** | **2h 04m 51s** |
 
-**4.85x**, measured end to end — not extrapolated. Both runs are in the repo's
+**3.79x**, measured end to end — not extrapolated. Both runs are in the repo's
 result-JSON format and each records its own `docker run` line, so the pinning that
 produced a number is recoverable from the number's own file.
 
@@ -157,12 +158,14 @@ output** — 7,709,239 variants, 6,443,505 SNPs, 1,265,734 indels, 4,842,559 pas
 down to identical QUAL values on the first variant of chr1. Core count changed the
 wall clock and nothing else.
 
-Scaling is sublinear (4.85x from 6x the cores, 12x the threads) because
-`make_examples` is I/O- and Python-bound and half the 192 are SMT siblings rather
-than cores. The demo says so rather than rounding it up to "12x".
+Scaling is sublinear (3.79x from 6x the cores) because `make_examples` is I/O- and
+Python-bound. The demo says so rather than rounding it up to "6x".
 
-Note this WGS pair predates the switch to a core-to-core race, so its fast leg is
-192 threads. The chr20 table above is the comparison the app now runs.
+**What hyperthreading is worth, stated separately.** The same genome on all 192
+*threads* takes **25m 47s**, so SMT adds 1.28x on top of 96 cores. That is a real
+result and we publish it — it is simply not core scaling, so it is not what the race
+claims. SMT helps the whole genome (1.28x) far more than chr20 (1.07x), because a
+full genome has enough independent work to keep the sibling threads fed.
 
 ---
 

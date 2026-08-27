@@ -1219,7 +1219,7 @@ def test_wgs_runtimes_are_measured_not_illustrative():
 
     sample = next(s for s in Config.load().samples if s.id == "wgs")
     assert sample.illustrative is False
-    assert sample.runtime_fast_s == 1547, "all-192-thread run, measured twice"
+    assert sample.runtime_fast_s == 1979, "96-physical-core run (cpuset 0-95)"
     assert sample.runtime_slow_s == 7491, "16-core run, measured 2026-08-26"
 
 

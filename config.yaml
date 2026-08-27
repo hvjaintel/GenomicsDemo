@@ -339,26 +339,34 @@ samples:
     dataset: "wgs_bam"
     regions: null
     blurb: "The headline run. Complete 30-35x human genome, 46 GB of aligned reads."
-    # runtime_fast_s is MEASURED on this box: 25m 47s (1547 s) on all 192
-    # threads, 192 shards, DeepVariant 1.10.0, 7,709,239 variants.
-    #   make_examples 13m50s | call_variants 11m05s | postprocess 49s
-    # Re-measured after the scratch-space fix: 1546 s. Two runs one second
-    # apart, so treat 1547 as solid rather than lucky.
+    # runtime_fast_s is MEASURED on this box at 96 PHYSICAL CORES (cpuset
+    # 0-95), which is the leg the race actually runs: 32m 59s (1979 s),
+    # 192 shards, DeepVariant 1.10.0, 7,709,239 variants.
+    #   make_examples 17m37s | call_variants 14m20s | postprocess 59s
+    #
+    # For reference, the same genome on all 192 THREADS took 1547 s (and 1546 s
+    # on a repeat). So SMT is worth 1.28x on top of 96 cores here -- real, but
+    # it is hyperthreading, not core scaling, so it is not what the race
+    # claims. Note SMT helps WGS (1.28x) far more than chr20 (1.07x): a whole
+    # genome has enough independent work to keep the sibling threads fed.
     # For reference, Google publish 69 min for 1.10 on a 96-vCPU n2-standard-96.
     #
     # Note this beat the estimate scaled from chr20 (~46 min) by a wide margin:
     # a whole genome offers far more independent work than a single contig, so
     # chr20 UNDERSTATES whole-genome scaling. Do not extrapolate the other way.
     #
-    # runtime_slow_s is now MEASURED too: 2h 04m 51s (7491 s) pinned to
+    # runtime_slow_s is MEASURED too: 2h 04m 51s (7491 s) pinned to
     # scaling.baseline_cpuset "0-15" -- 16 of the 96 physical cores.
     #   make_examples 1h26m40s | call_variants 33m58s | postprocess 4m10s
-    # That is 4.85x, against a previous estimate of 9000 s which ran ~20% high.
+    #
+    # Core to core that is 7491/1979 = 3.79x. The older 16-cores-vs-192-threads
+    # figure was 4.85x; the difference is SMT, which the race no longer claims
+    # as core scaling.
     #
     # Both runs produced byte-identical output: 7,709,239 variants, 6,443,505
     # SNPs, 1,265,734 indels, 4,842,559 passing. Core count changed the wall
     # clock and nothing else, which is the point worth making at the booth.
-    runtime_fast_s: 1547
+    runtime_fast_s: 1979
     runtime_slow_s: 7491
     illustrative: false
     show_in_booth: true

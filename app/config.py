@@ -297,7 +297,7 @@ class Config:
         except KeyError as exc:
             raise ConfigError(f"unknown engine '{key}'") from exc
 
-    # -- AMX -------------------------------------------------------------
+    # -- instruction set (config key still named "amx"; see config.yaml) ----
 
     def isa_for(self, amx_on: bool) -> str:
         return self.raw["amx"]["enabled" if amx_on else "disabled"]["onednn_max_cpu_isa"]

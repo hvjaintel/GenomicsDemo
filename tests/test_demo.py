@@ -912,7 +912,7 @@ def test_masthead_omits_the_partner_mark_when_it_is_blank(cfg):
 
     home = render_home(blank)
     assert "—  ." not in home and "— ." not in home
-    assert "fp32 (docs/AMX-FINDINGS.md)." in home
+    assert "(docs/AMX-FINDINGS.md)." in home
 
 
 def test_partner_mark_still_renders_when_one_is_configured(cfg):
@@ -1332,3 +1332,160 @@ def test_served_page_has_no_render_blocking_external_resources():
     for tag in re.findall(r"<script[^>]*>", html):
         if re.search(r'src="https?://', tag) and not re.search(r"\basync\b|\bdefer\b", tag):
             raise AssertionError(f"blocking external script: {' '.join(tag.split())}")
+
+
+# ---------------------------------------------------------------------------
+# The AMX race: it may only report a number when the tiles actually ran.
+# ---------------------------------------------------------------------------
+
+
+class _Dispatch:
+    """Stand-in for a verification RunResult, which is all the gate reads."""
+
+    def __init__(self, compute: int, amx: int):
+        self.compute_primitives = compute
+        self.amx_primitives = amx
+        self.isa_impl_summary = f"{amx} of {compute} compute primitives used AMX"
+
+
+def test_only_the_amx_on_leg_gets_the_bf16_rewrite(cfg, spec):
+    """The graph rewrite IS the mechanism, so it must not leak into the baseline.
+
+    If both legs got it, the race would compare a thing to itself; if the OFF
+    leg got it, the label on screen would be a lie.
+    """
+    runner = DeepVariantRunner(cfg)
+    armed = dataclasses.replace(spec, amx_extra_args="config_string='x'")
+    on = runner.build_command(armed, amx_on=True, out_dir=Path("/tmp/o"), verbose_isa=False)
+    off = runner.build_command(armed, amx_on=False, out_dir=Path("/tmp/o"), verbose_isa=False)
+
+    assert any(a.startswith("--call_variants_extra_args=") for a in on)
+    assert not any("call_variants_extra_args" in a for a in off)
+
+
+def test_the_bf16_rewrite_survives_argv_without_a_shell():
+    """The flag value contains spaces, braces and quotes and is passed unshelled.
+
+    Measured on the box: with this exact value, 190 of 190 compute primitives
+    dispatched to AMX. Mangling it would silently drop the demo back to
+    AVX-512 while still labelling the leg "AMX ON".
+    """
+    engine = get_config().amx_engine
+    assert engine is not None
+    value = engine.amx_extra_args
+    assert value.startswith("config_string=")
+    assert "auto_mixed_precision_onednn_bfloat16: ON" in value
+    # No stray newline or wrapping quote from the YAML block scalar.
+    assert value == value.strip()
+    assert not value.startswith('"')
+
+
+def test_the_rewrite_flag_is_excluded_from_the_fingerprint(spec):
+    """Both legs must share a fingerprint or `speedup` refuses to report."""
+    armed = dataclasses.replace(spec, amx_extra_args="config_string='x'")
+    assert armed.fingerprint_digest() == spec.fingerprint_digest()
+
+
+def test_only_an_engine_with_a_mechanism_counts_as_amx_capable(cfg):
+    """Running on an AMX CPU is not the same as dispatching AMX."""
+    assert cfg.default_engine.amx_capable is False
+    engine = cfg.amx_engine
+    assert engine is not None
+    assert engine.amx_capable
+    assert engine.amx_mechanism
+
+
+def test_the_amx_race_swaps_both_legs_onto_the_capable_engine(cfg, spec):
+    """Move both legs together, or the race varies the image as well as AMX."""
+    on, off = build_legs(cfg, spec, "amx")
+    engine = cfg.amx_engine
+    assert on.spec.engine_image == off.spec.engine_image == engine.image
+    assert on.spec.engine_image != spec.engine_image
+    assert on.spec.fingerprint_digest() == off.spec.fingerprint_digest()
+    assert on.amx_on and not off.amx_on
+
+
+def test_the_scaling_race_is_left_on_the_default_engine(cfg, spec):
+    """The booth headline must not silently move to the superseded build."""
+    full, limited = build_legs(cfg, spec, "scaling")
+    assert full.spec.engine_image == spec.engine_image
+    assert full.amx_on == limited.amx_on
+
+
+def test_no_speedup_when_the_amx_leg_never_touched_the_tiles(cfg, spec):
+    """The exact failure documented for DeepVariant 1.10: AMX permitted, never used."""
+    from app.race import dispatch_objection
+
+    on, off = build_legs(cfg, spec, "amx")
+    objection = dispatch_objection("amx", (on, off), {on.key: _Dispatch(95, 0)})
+    assert objection and "not one of them used AMX" in objection
+
+
+def test_a_real_amx_dispatch_clears_the_gate(cfg, spec):
+    from app.race import dispatch_objection
+
+    on, off = build_legs(cfg, spec, "amx")
+    assert dispatch_objection("amx", (on, off), {on.key: _Dispatch(190, 190)}) is None
+
+
+def test_the_gate_does_not_second_guess_the_scaling_race(cfg, spec):
+    """Core scaling makes no AMX claim, so AMX evidence is irrelevant to it."""
+    from app.race import dispatch_objection
+
+    full, limited = build_legs(cfg, spec, "scaling")
+    assert dispatch_objection("scaling", (full, limited), {full.key: _Dispatch(95, 0)}) is None
+
+
+def test_an_unverified_race_is_not_treated_as_a_disproven_one(cfg, spec):
+    """--skip-verify means no evidence either way; that is not grounds to refuse."""
+    from app.race import dispatch_objection
+
+    on, off = build_legs(cfg, spec, "amx")
+    assert dispatch_objection("amx", (on, off), {}) is None
+
+
+def test_the_amx_engine_carries_its_caveat(cfg):
+    """The number is real but it is not the fastest path; saying so is mandatory."""
+    engine = cfg.amx_engine
+    assert engine.amx_caveat
+    assert "1.5.0" in engine.amx_caveat
+    assert "2.5x" in engine.amx_caveat
+
+
+def test_the_amx_verdict_shows_the_caveat_with_the_speedup(cfg):
+    """A visitor must never see the multiplier without the qualification."""
+    from app import main as main_mod
+
+    spec = RunSpec(
+        sample_id="chr20", bam=Path("/d/a.bam"), reference=Path("/d/r.fasta"),
+        regions="chr20", num_shards=192, engine_image="google/deepvariant:1.10.0",
+    )
+    on_leg, off_leg = build_legs(cfg, spec, "amx")
+    main_mod.STATE.race_labels = (on_leg.label, off_leg.label)
+    html = main_mod._race_verdict(
+        cfg, "chr20", _result(True, 314), _result(False, 358), False,
+        mode="amx", legs=(on_leg, off_leg),
+        dispatch={on_leg.key: _Dispatch(190, 190), off_leg.key: _Dispatch(190, 0)},
+    )
+    assert "1.14" in html or "1.1" in html
+    assert cfg.amx_engine.amx_caveat[:40] in html
+    assert "190 of 190" in html
+
+
+def test_the_amx_verdict_withholds_the_multiplier_when_the_tiles_were_idle(cfg):
+    from app import main as main_mod
+
+    spec = RunSpec(
+        sample_id="chr20", bam=Path("/d/a.bam"), reference=Path("/d/r.fasta"),
+        regions="chr20", num_shards=192, engine_image="google/deepvariant:1.10.0",
+    )
+    on_leg, off_leg = build_legs(cfg, spec, "amx")
+    main_mod.STATE.race_labels = (on_leg.label, off_leg.label)
+    html = main_mod._race_verdict(
+        cfg, "chr20", _result(True, 126), _result(False, 128), False,
+        mode="amx", legs=(on_leg, off_leg),
+        dispatch={on_leg.key: _Dispatch(95, 0), off_leg.key: _Dispatch(95, 0)},
+    )
+    assert "No speedup shown" in html
+    # The timings are still shown -- withheld ratio, not withheld data.
+    assert "1.02x" not in html and "1.0x" not in html

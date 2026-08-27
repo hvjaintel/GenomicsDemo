@@ -55,7 +55,37 @@ engines:
     path: "bam_in"
     default: true
 
-  # Intel Open-Omics optimised DeepVariant. Must be BUILT locally from the
+  # DeepVariant 1.5.0 — kept ONLY because it is the version on which AMX can
+  # actually be engaged. 1.5 runs a TF1 static graph, and the bf16 Grappler
+  # rewrite that lights up the AMX tiles is safe there. 1.6 moved to TF2/Keras
+  # and the same rewrite breaks the genotype likelihoods, which is why AMX is
+  # inert on 1.10 no matter what you set. See docs/AMX-FINDINGS.md.
+  #
+  # This needs no Intel fork and no local build: stock 1.5.0 exposes
+  # --call_variants_extra_args, and `config_string` is text_format.Parse'd
+  # straight into the same ConfigProto the Open-Omics fork edits by hand.
+  #
+  # READ BEFORE PUTTING THIS ON A BOOTH SCREEN: 1.10 with the tiles idle is
+  # 2.5x faster end to end than 1.5 with AMX fully engaged. This engine wins an
+  # AMX race and loses the race that matters. amx_caveat below is rendered
+  # next to any result produced with it, and is not optional.
+  google_deepvariant_15:
+    label: "DeepVariant 1.5.0 (AMX-capable, superseded)"
+    image: "google/deepvariant:1.5.0"
+    buildable: false
+    path: "bam_in"
+    default: false
+    # The supported flag that turns the AMX tiles on. Applied to the AMX-ON leg
+    # only; the AMX-OFF leg runs the same image with nothing added.
+    amx_mechanism: "bf16_graph_rewrite"
+    amx_extra_args: >-
+      config_string='graph_options: {rewrite_options: {auto_mixed_precision_onednn_bfloat16: ON}}'
+    amx_caveat: >-
+      Measured on DeepVariant 1.5.0. AMX only engages on this version. Stock
+      1.10.0 — with the AMX tiles idle — finishes the same genome 2.5x faster
+      than 1.5.0 with AMX fully engaged.
+
+
   # IntelLabs Dockerfile — there is no prebuilt image on Docker Hub.
   #
   # A "~2.7x faster call_variants" claim used to sit in this comment. It came

@@ -15,10 +15,13 @@ Two modes, because measurement said so:
       no precision trade. This is the booth headline.
 
   amx
-      AMX permitted versus AMX disabled. Kept because the question gets asked
-      and the answer deserves evidence rather than a shrug: on stock
-      DeepVariant 1.10 the model is fp32, AMX has no fp32 path, and the tiles
-      never run a single kernel. See docs/AMX-FINDINGS.md.
+      AMX permitted versus AMX disabled, on the one DeepVariant build that can
+      actually dispatch it. Stock 1.10 runs an fp32 graph and AMX has no fp32
+      path, so its tiles never run a kernel; 1.5.0 accepts a bf16 graph-rewrite
+      flag and puts every convolution on AMX. The race therefore runs 1.5.0 and
+      says so on screen, along with the awkward part: 1.10 with the tiles idle
+      still finishes faster than 1.5.0 with them fully engaged. See
+      docs/AMX-FINDINGS.md.
 
 Both legs run sequentially, never concurrently. Two simultaneous 192-shard
 runs would fight over the same cores and neither number would mean anything.
@@ -28,10 +31,12 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import time
 import sys
 
 from .config import Config
 from .replay import record_trace
+from .run import PROGRESS_EVERY_S, _active_stage
 from .runner import DeepVariantRunner, RunResult, RunSpec, time_ratio
 
 
@@ -85,6 +90,7 @@ def _run_leg(
     log: list[str] = []
     result: RunResult | None = None
     last_pct = -1.0
+    last_print = 0.0
 
     for event in runner.run(
         leg.spec, amx_on=leg.amx_on, run_id=run_id, verbose_isa=False, leg_id=leg.key
@@ -94,10 +100,20 @@ def _run_leg(
             if not quiet:
                 print(f"  {event.line}", flush=True)
         elif event.kind == "heartbeat" and quiet:
+            # make_examples emits no percentage at all and is by far the longest
+            # stage, so a percentage-only heartbeat goes silent for over an hour
+            # on a whole genome and looks like a hang. Report the stage instead
+            # of inventing a number for it.
             pct = event.overall_percent or 0.0
+            now = time.time()
             if pct - last_pct >= 10:
                 last_pct = pct
+                last_print = now
                 print(f"  ... {pct:.0f}%  ({event.elapsed_s:.0f}s)", flush=True)
+            elif now - last_print >= PROGRESS_EVERY_S:
+                last_print = now
+                stage = _active_stage(event.stages) or "working"
+                print(f"  ... {stage}  ({event.elapsed_s:.0f}s)", flush=True)
         if event.result is not None:
             result = event.result
 
@@ -121,9 +137,23 @@ def build_legs(cfg: Config, spec: RunSpec, mode: str) -> tuple[Leg, Leg]:
     fingerprint check in `time_ratio` would then refuse to print a number.
     """
     if mode == "amx":
+        engine = cfg.amx_engine
+        if engine is None:
+            raise SystemExit(
+                "No engine in config.yaml declares an AMX mechanism, so an AMX "
+                "race would compare two identical fp32 runs and report noise as "
+                "a result. See docs/AMX-FINDINGS.md."
+            )
+        # Swap the whole race onto the AMX-capable build. Both legs move
+        # together, so the only thing that differs remains the AMX state.
+        amx_spec = dataclasses.replace(
+            spec,
+            engine_image=engine.image,
+            amx_extra_args=engine.amx_extra_args,
+        )
         return (
-            Leg("amx-on", cfg.amx_label(True), spec, True),
-            Leg("amx-off", cfg.amx_label(False), spec, False),
+            Leg("amx-on", cfg.amx_label(True), amx_spec, True),
+            Leg("amx-off", cfg.amx_label(False), amx_spec, False),
         )
 
     scaling = cfg.scaling
@@ -141,6 +171,34 @@ def build_legs(cfg: Config, spec: RunSpec, mode: str) -> tuple[Leg, Leg]:
         Leg("full", scaling.get("full_label", "all cores"), spec, amx_on),
         Leg("limited", scaling.get("baseline_label", f"cores {cpuset}"), baseline, amx_on),
     )
+
+
+def dispatch_objection(mode: str, legs, dispatch: dict) -> str | None:
+    """Why this race's speedup must not be shown, or None if it may be.
+
+    An AMX race is only a measurement of AMX if the tiles actually ran
+    something. When verification says they did not, the two legs are the same
+    fp32 work twice over and the ratio is measuring run-to-run variance. The
+    honest output there is no number at all -- not a small number.
+
+    Verification is skippable (--skip-verify), and an unverified race is not a
+    disproven one, so absence of evidence returns None and the caller prints
+    the "not verified this run" label it already has.
+    """
+    if mode != "amx":
+        return None
+    for leg in legs:
+        if not leg.amx_on:
+            continue
+        res = dispatch.get(leg.key)
+        if res is None or not res.compute_primitives:
+            continue
+        if not res.amx_primitives:
+            return (
+                f"the AMX-on leg ran {res.compute_primitives} compute kernels and "
+                "not one of them used AMX, so there is no AMX effect to measure"
+            )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -175,8 +233,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Reference  : {spec.reference}")
     print(f"Regions    : {spec.regions or 'whole genome'}")
     print(f"Shards     : {spec.num_shards}")
-    print(f"Image      : {spec.engine_image}")
-    print(f"Fingerprint: {spec.fingerprint_digest()}")
+    print(f"Image      : {candidate.spec.engine_image}")
+    print(f"Fingerprint: {candidate.spec.fingerprint_digest()}")
     print(f"Comparing  : {candidate.label}  vs  {baseline.label}")
 
     run_id = f"race-{args.mode}-{args.sample}"
@@ -201,10 +259,11 @@ def main(argv: list[str] | None = None) -> int:
             if res and leg.amx_on and res.compute_primitives and not res.amx_primitives:
                 print(
                     f"\n  NOTE: {leg.label} permitted AMX but NO kernel used it.\n"
-                    "  DeepVariant's model is fp32 and AMX has no fp32 path, so the\n"
-                    "  tiles have nothing to do. This is expected and documented in\n"
-                    "  docs/AMX-FINDINGS.md — it is why the booth headline is the\n"
-                    "  core-scaling race, not an AMX race."
+                    "  Permitting AMX is not the same as using it: the ISA setting\n"
+                    "  only lifts a ceiling. On an fp32 graph there is no AMX path,\n"
+                    "  so the tiles stay idle. Any time difference measured from here\n"
+                    "  is noise, and the verdict below will refuse to report it.\n"
+                    "  See docs/AMX-FINDINGS.md."
                 )
             if res and not leg.amx_on and res.amx_primitives:
                 print(f"\n  WARNING: {leg.label} used AMX kernels. It is not a baseline.")
@@ -230,6 +289,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{leg.label:<20} requested {result.requested_isa:<16} | {evidence}")
 
     ratio = time_ratio(cand, base)
+    objection = dispatch_objection(args.mode, (candidate, baseline), dispatch)
+    if objection:
+        print(f"\nNo speedup shown: {objection}.")
+        print(f"  For the record — {baseline.label}: {base.wall_clock_s:.1f}s, "
+              f"{candidate.label}: {cand.wall_clock_s:.1f}s.")
+        print("  Two timings of identical work, shown as timings and not as a ratio.")
+        return 1
     if ratio is None:
         print("\nNo speedup shown. The comparison was not valid:")
         if cand.error or base.error:
@@ -241,6 +307,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n{baseline.label:<20}: {base.wall_clock_s:>8.1f}s")
     print(f"{candidate.label:<20}: {cand.wall_clock_s:>8.1f}s")
     print(f"{'Speedup':<20}: {ratio:>8.2f}x  (same binary, same data, same shards)")
+
+    caveat = getattr(cfg.amx_engine, "amx_caveat", None) if args.mode == "amx" else None
+    if caveat:
+        print(f"\nCAVEAT: {caveat}")
 
     if cand.variant_counts and base.variant_counts:
         print(f"\nVariants: {candidate.label} {cand.variant_counts.total:,} · "

@@ -85,6 +85,16 @@ class RunSpec:
     # was retired), so like the AMX state it is excluded from the fingerprint.
     # None means "the whole machine".
     cpuset: str | None = None
+    # Extra argv for `call_variants`, applied ONLY when a run is AMX-ON.
+    #
+    # This is what actually engages the tiles on DeepVariant 1.5: raising the
+    # oneDNN ISA ceiling alone does nothing, because an fp32 graph gives AMX
+    # nothing to do. The bf16 Grappler rewrite is the mechanism; the ceiling
+    # merely permits it.
+    #
+    # Excluded from the fingerprint for the same reason the ISA ceiling and the
+    # cpuset are: it is the one thing an AMX race is allowed to vary.
+    amx_extra_args: str | None = None
 
     @property
     def core_count(self) -> int | None:
@@ -239,6 +249,7 @@ class DeepVariantRunner:
             regions=sample.regions,
             num_shards=self.cfg.num_shards,
             engine_image=engine.image,
+            amx_extra_args=engine.amx_extra_args,
             numa_policy=compute.get("numa_policy", "interleave_all"),
             numa_node=int(compute.get("numa_node", 0)),
             shm_size=compute.get("docker_shm_size"),
@@ -367,6 +378,11 @@ class DeepVariantRunner:
         ]
         if spec.regions:
             cmd.append(f"--regions={spec.regions}")
+        # The bf16 graph rewrite is the actual AMX mechanism, so it belongs to
+        # the AMX-ON leg and nowhere else. Adding it to both would make the
+        # race meaningless; adding it to the OFF leg would be a lie.
+        if amx_on and spec.amx_extra_args:
+            cmd.append(f"--call_variants_extra_args={spec.amx_extra_args}")
         return cmd
 
     @staticmethod

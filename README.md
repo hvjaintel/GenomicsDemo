@@ -13,12 +13,15 @@ server and proves three things to a live audience:
    happens, not in a loud data hall.
 
 > **About AMX.** This demo was originally designed around an AMX ON/OFF race. Measurement
-> killed that idea and we kept the measurement instead of the idea: stock DeepVariant 1.10
+> complicated that, and we kept the measurement instead of the idea. Stock DeepVariant 1.10
 > ships an **fp32** model, AMX has no fp32 path, and the tiles never execute a single
-> kernel (0 of 95 compute primitives). Forcing bf16 does engage AMX — and is ~1.6× *slower*
-> and produces genotype likelihoods DeepVariant itself rejects. The full evidence,
-> including how to reproduce it, is in **[docs/AMX-FINDINGS.md](docs/AMX-FINDINGS.md)**.
-> The AMX comparison is still in the app, as an evidence panel rather than a headline.
+> kernel (0 of 95 compute primitives) — so on the default engine there is nothing to race.
+> DeepVariant **1.5.0** is different: a stock flag rewrites the graph to bf16 and puts
+> **190 of 190** convolutions on AMX, and it is genuinely faster with the tiles engaged.
+> That race is in the app and is real. It also carries an unavoidable caveat, shown on
+> screen with the result: 1.10 with the tiles *idle* still finishes the same genome
+> **2.5× faster** than 1.5.0 with them fully engaged. The full evidence, including how to
+> reproduce all of it, is in **[docs/AMX-FINDINGS.md](docs/AMX-FINDINGS.md)**.
 
 ---
 
@@ -61,13 +64,27 @@ This demo shows real numbers or it shows nothing.
 
 > Good question, and the honest answer is more interesting than a slide. AMX is a
 > matrix-multiply engine in every core of this Xeon, and it's genuinely fast — but it only
-> works on bf16 and int8. The public DeepVariant model is fp32, so oneDNN runs every
-> convolution on AVX-512 and the AMX tiles sit idle. We measured it: zero of ninety-five
-> compute operations touched AMX. We then forced the model into bf16, which *does* light up
-> the tiles — and it came out slower, and the accuracy dropped far enough that DeepVariant's
-> own validation rejected the output. So on this workload, today, the Xeon story is core
-> scaling and AVX-512. Give us a bf16-trained or int8-quantised model and AMX becomes the
-> story instead.
+> works on bf16 and int8. The DeepVariant model we run by default is fp32, so oneDNN puts
+> every convolution on AVX-512 and the AMX tiles sit idle. We measured it: zero of
+> ninety-five compute operations touched AMX.
+>
+> So we went and found the version where it *does* work. DeepVariant 1.5.0 takes a stock
+> flag that rewrites the network to bf16, and then every single convolution — a hundred and
+> ninety of a hundred and ninety — runs on AMX. You can race it right here, and it wins.
+>
+> Here's the twist, and we put it on the screen rather than hiding it: the *newer*
+> DeepVariant, with the AMX tiles completely idle, is still about two and a half times
+> faster than the old one with AMX flat out. Google changed the algorithm so most candidate
+> variants never reach the big network at all. Better algorithm beat better silicon. That's
+> why our headline is core scaling — and why, the day a bf16-trained model ships, AMX
+> becomes the headline instead.
+
+**Press the button, don't take our word for it.** Before the AMX race times anything, it
+runs a short slice with `ONEDNN_VERBOSE=1` and counts which instruction set each compute
+kernel actually used. Those counts are displayed. If the AMX-ON leg comes back with zero
+AMX kernels, the app **refuses to show a speedup at all** and displays the two wall-clock
+times instead — because a ratio between two runs that both went down the AVX-512 path is
+measuring nothing but run-to-run variance.
 
 Everything else is held constant by construction: both legs of a race are built from a single
 `RunSpec`, and the app compares a fingerprint of every shared parameter before it will report
@@ -346,11 +363,17 @@ Put the browser full screen (F11). Leave the **Status** tab up between visitors.
 
 1. **Status** — "96 cores, a terabyte of RAM, and the accelerators are already in the CPU."
 2. **Dataset** — pick *HG002 chr20*. "A real human chromosome at 35x depth."
-3. **Scaling race** — press **RACE: 16 cores vs all 192 threads**.
+3. **Race** — leave *What to vary* on **Core scaling** and press
+   **RACE: 16 cores vs all 192 threads**.
 4. Watch the 16-core leg run first (~6 min), then the full machine overtake it (~2 min).
 5. **Speedup card** lands: "Xeon scales: all 192 threads vs 16 cores — ~2.8×", alongside the
    variant counts proving both legs produced the same answer.
 6. **Results** — same variant counts either way. Speed without an accuracy trade.
+
+If the visitor asks about AMX, switch *What to vary* to **AMX on vs AMX off** and run it —
+about 13 minutes on chr20 including the dispatch-verification pass, so offer it to the
+interested rather than to everyone. Read the on-screen caveat with them; it is the most
+interesting part of the answer.
 
 ### Resetting between visitors
 
@@ -534,9 +557,14 @@ external stylesheet or script ever reappears.
 ```
 
 The suite covers the guarantees that matter: that the scaling race changes nothing but
-`--cpuset-cpus`, that the AMX toggle changes nothing but the ISA,
-that a speedup is refused when a comparison is invalid, that VCF counting is correct, and that
-ISA verification catches a mismatch.
+`--cpuset-cpus`, that the AMX toggle changes nothing but the ISA and the graph-rewrite flag
+that *is* the AMX mechanism, that the rewrite flag reaches the AMX-ON leg and only that leg,
+that a speedup is refused when a comparison is invalid **or when the AMX tiles turn out to
+have been idle**, that the AMX caveat is rendered alongside any AMX speedup, that VCF
+counting is correct, and that ISA verification catches a mismatch.
+
+The honesty guards are mutation-tested, not just asserted: each was deliberately broken to
+confirm the corresponding test fails. A test that passes against broken code is decoration.
 
 ---
 

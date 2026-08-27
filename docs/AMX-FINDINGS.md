@@ -219,6 +219,20 @@ Full chr20, 192 shards, verbose logging off:
 Variants called: **215,899 in both legs — identical.** No accuracy trade at
 the call-set level.
 
+Independently reproduced end to end through the app's own race path
+(`python -m app.race --mode amx --sample chr20`, trace in
+`traces/amx-1.5-chr20.json`):
+
+| | AMX OFF | AMX ON | |
+| --- | --- | --- | --- |
+| End to end | 360.4 s | 319.4 s | **1.13x** |
+| Compute primitives on AMX | 0 of 190 | 190 of 190 | |
+| Variants called | 215,899 | 215,899 | identical |
+
+Two independent measurements, 1.14x and 1.13x, on the same hardware and data.
+The remainder is run-to-run variance, which is roughly the size a booth
+audience should expect a repeated run to move by.
+
 So AMX is real, it is correct, and on this workload it is worth about **18% on
 the inference stage and 14% end to end**. That is a genuine result. It is also
 a long way from the order-of-magnitude figures AMX is usually marketed with,
@@ -260,23 +274,41 @@ nobody deploying this pipeline should be asking.
 they are different models and different callers. That is a version difference,
 not an AMX effect: within each version the two legs agree exactly.)
 
-## What the demo does instead
+## What the demo does
 
-The booth headline is a **core-scaling race**: identical binary, identical
+Two races, both real, and the UI is explicit about which question each answers.
+
+**The booth headline is the core-scaling race**: identical binary, identical
 data, identical shard count, identical ISA settings, and the only difference is
 how many logical CPUs Docker lets the container use (`--cpuset-cpus`).
 
 No precision trade, no asterisk, and the output is provably identical — both
-legs call exactly **210,390 variants** on chr20.
+legs call exactly **210,390 variants** on chr20, and on a whole genome the two
+legs' VCFs are byte-identical at **7,709,239 variants**.
+
+**The AMX race is live too**, on DeepVariant 1.5.0, because that is the build
+whose graph AMX can actually accelerate (Finding 4). Selecting it in the Race
+tab swaps *both* legs onto `google/deepvariant:1.5.0` and adds the bf16
+graph-rewrite flag to the AMX-ON leg only, so the single varying factor is
+still the single varying factor.
+
+Three things guard it:
+
+1. **Dispatch is verified before anything is timed.** A short slice of the same
+   BAM runs with `ONEDNN_VERBOSE=1` and the kernels are counted. Verbose
+   logging is kept out of the timed legs because bf16 issues more primitives
+   than fp32, so leaving it on would penalise the leg being measured.
+2. **Zero AMX kernels means zero speedup displayed.** `dispatch_objection()`
+   withholds the multiplier and shows the two wall-clock times instead. This is
+   not hypothetical — it is exactly what 1.10.0 does, and running the AMX race
+   against the default engine would hit it.
+3. **The caveat ships with the number.** Finding 5 is displayed next to the
+   result: 1.10.0 with the tiles idle still beats 1.5.0 with them fully
+   engaged. A visitor cannot see the multiplier without seeing that.
 
 `RunSpec.fingerprint()` excludes exactly one field per race mode (the AMX
 state, or the cpuset). Everything else must match or `time_ratio()` returns
 `None` and the UI refuses to display a speedup at all.
-
-The AMX comparison is kept as an **evidence panel** rather than deleted. Booth
-visitors ask about AMX, and "here is the measurement, and here is why the tiles
-are idle on this workload" is a better answer than either a shrug or a
-manufactured number.
 
 ## Reproducing this
 
@@ -291,7 +323,15 @@ docker run --rm -e ONEDNN_MAX_CPU_ISA=AVX512_CORE_AMX -e ONEDNN_VERBOSE=1 \
 # The honest headline
 python -m app.race --mode scaling --sample chr20
 
-# Finding 1: AMX permitted vs disabled, both fp32
+# The AMX race, on the version where AMX actually dispatches. Phase 1 should
+# report 190 of 190 compute primitives on AMX for the ON leg and 0 of 190 for
+# the OFF leg; if the ON leg comes back 0, the run refuses to print a speedup.
+python -m app.race --mode amx --sample chr20
+
+# Finding 1: AMX permitted vs disabled on the default 1.10.0 engine, both fp32.
+# Temporarily clear `amx_mechanism` on the 1.5.0 engine in config.yaml to force
+# the race back onto 1.10.0, then expect 0 of 95 primitives on AMX and no
+# speedup reported at all.
 python -m app.race --mode amx --sample chr20
 
 # Finding 2: set amx.use_bf16_injection: true in config.yaml first.

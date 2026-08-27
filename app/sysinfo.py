@@ -18,14 +18,14 @@ from typing import Any
 
 from .config import Config
 
-# Instruction-set extensions that matter to the story.
+# Instruction-set extensions that matter to the story. This workload runs on
+# the AVX-512 vector units, so those are what the demo reports.
 ACCEL_FLAGS = {
-    "amx_tile": "AMX tile architecture",
-    "amx_bf16": "AMX BFloat16",
-    "amx_int8": "AMX INT8",
     "avx512f": "AVX-512 Foundation",
     "avx512_bf16": "AVX-512 BFloat16",
     "avx512_vnni": "AVX-512 VNNI",
+    "avx512_vbmi": "AVX-512 VBMI",
+    "avx512dq": "AVX-512 Doubleword & Quadword",
 }
 
 
@@ -56,21 +56,12 @@ class CpuInfo:
         return self.sockets * self.cores_per_socket
 
     @property
-    def has_amx(self) -> bool:
-        return "amx_tile" in self.flags and "amx_bf16" in self.flags
-
-    @property
     def has_avx512(self) -> bool:
         return "avx512f" in self.flags
 
     @property
     def accel_summary(self) -> str:
-        parts = []
-        if self.has_amx:
-            parts.append("AMX")
-        if self.has_avx512:
-            parts.append("AVX-512")
-        return " + ".join(parts) if parts else "none detected"
+        return "AVX-512" if self.has_avx512 else "none detected"
 
     @property
     def present_accel_flags(self) -> list[str]:
@@ -264,7 +255,6 @@ class SystemSnapshot:
             "numa_nodes": self.cpu.numa_nodes,
             "ram_gb": self.memory.total_gb,
             "accel": self.cpu.accel_summary,
-            "amx": self.cpu.has_amx,
             "avx512": self.cpu.has_avx512,
             "os": self.os_pretty,
             "kernel": self.kernel,

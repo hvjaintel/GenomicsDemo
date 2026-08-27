@@ -106,13 +106,13 @@ def report(result: RunResult, digest: str) -> None:
     # say what the run actually did. Only the second one is evidence.
     print(f"ISA ceiling: {result.reported_isa or 'not reported'} (permitted)")
     if result.compute_primitives:
-        pct = 100.0 * result.amx_primitives / result.compute_primitives
+        pct = 100.0 * result.avx512_primitives / result.compute_primitives
         print(
-            f"AMX kernels: {result.amx_primitives:,} of "
+            f"AVX-512 kernels: {result.avx512_primitives:,} of "
             f"{result.compute_primitives:,} compute primitives ({pct:.1f}%)"
         )
     else:
-        print("AMX kernels: not measured (run with --verbose-isa to count)")
+        print("AVX-512 kernels: not measured (run with --verbose-isa to count)")
 
     if result.vcf_path:
         print(f"VCF        : {result.vcf_path}")
@@ -128,11 +128,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cores",
         help="cpuset to pin to, e.g. '0-15'. Default: every core on the box.",
-    )
-    parser.add_argument(
-        "--amx",
-        action="store_true",
-        help="raise the oneDNN ISA ceiling to permit AMX (does not force it)",
     )
     parser.add_argument(
         "--verbose-isa",
@@ -175,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     cores = spec.core_count or os.cpu_count()
     print(f"Cores      : {spec.cpuset or 'all'} ({cores} logical)")
     print(f"Image      : {spec.engine_image}")
-    print(f"AMX        : {'permitted' if args.amx else 'disabled'} (ISA ceiling)")
+    print(f"ISA ceiling: {cfg.isa_for(True)}")
     print(f"Fingerprint: {spec.fingerprint_digest()}")
 
     if args.verbose_isa:
@@ -206,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     last_print = 0.0
     for event in runner.run(
         spec,
-        amx_on=args.amx,
+        amx_on=True,
         run_id=f"run-{args.sample}",
         verbose_isa=args.verbose_isa,
         leg_id="single",

@@ -55,7 +55,7 @@ def record_trace(
 
     `legs` maps a leg key to (log lines, result). The keys come from whichever
     race produced the run -- "full"/"limited" for a core-scaling race,
-    "amx-on"/"amx-off" for an AMX race -- so they are recorded verbatim rather
+    "full"/"limited" for a core-scaling race -- so they are recorded verbatim rather
     than forced into a fixed pair of names.
     """
     cfg.traces_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +105,7 @@ def validate_trace(data: dict) -> list[str]:
             if "reported_isa" not in result:
                 problems.append(
                     f"leg '{key}' has no 'reported_isa' — the ISA actually used was never "
-                    "captured, so the AMX claim is unverifiable"
+                    "captured, so the instruction-set claim is unverifiable"
                 )
             if result.get("started_at") in (None, 0) or result.get("finished_at") in (None, 0):
                 problems.append(f"leg '{key}' has no real start/finish timestamps")

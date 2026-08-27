@@ -5,7 +5,7 @@ it needs a bwa-mem2 index of the reference (a slow, ~70 GB build) and takes far
 longer than a booth visitor will wait. It exists for the headline WGS story and
 for anyone who asks "but what about alignment?".
 
-The AMX toggle applies here exactly as it does to the BAM-in path — same
+The instruction-set pinning applies here exactly as it does to the BAM-in path — same
 ONEDNN_MAX_CPU_ISA ceiling, same everything else.
 """
 
@@ -93,7 +93,7 @@ def build_fq2bams_command(
     """`docker run` argv for the alignment stage.
 
     The ISA env is set the same way as the BAM-in path, so an fq2vcf run is
-    just as valid a demonstration of the AMX toggle.
+    just as valid a demonstration of the core-scaling race.
     """
     engine = cfg.engine(engine_key)
     isa = cfg.isa_for(amx_on)

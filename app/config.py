@@ -101,18 +101,6 @@ class Engine:
     build_repo: str | None = None
     build_context: str | None = None
     build_dockerfile: str | None = None
-    amx_mechanism: str | None = None
-    amx_extra_args: str | None = None
-    amx_caveat: str | None = None
-
-    @property
-    def amx_capable(self) -> bool:
-        """True when this engine has a mechanism that actually dispatches AMX.
-
-        Every engine *runs* on an AMX-capable CPU; only these can put work on
-        the tiles. Measured, not assumed -- see docs/AMX-FINDINGS.md.
-        """
-        return bool(self.amx_mechanism and self.amx_extra_args)
 
 
 class Config:
@@ -147,10 +135,15 @@ class Config:
             isa = self.raw["amx"].get(state, {}).get("onednn_max_cpu_isa")
             if not isa:
                 raise ConfigError(f"amx.{state}.onednn_max_cpu_isa must be set")
-        if self.raw["amx"]["enabled"]["onednn_max_cpu_isa"] == self.raw["amx"]["disabled"]["onednn_max_cpu_isa"]:
+        # The demo runs one pinned instruction set, and no race varies it. If
+        # these two ever diverged, some code path could produce two runs on
+        # different ISAs and the UI would report the difference as a core-scaling
+        # result. Requiring them equal makes that impossible by construction.
+        if self.raw["amx"]["enabled"]["onednn_max_cpu_isa"] != self.raw["amx"]["disabled"]["onednn_max_cpu_isa"]:
             raise ConfigError(
-                "amx.on and amx.off resolve to the same ISA ceiling — the toggle "
-                "would be meaningless and any reported speedup dishonest"
+                "the two ISA entries resolve to different ceilings — this demo "
+                "pins a single instruction set, and a race that varied it would "
+                "attribute an ISA difference to the core budget"
             )
         known = set(self.raw["datasets"])
         for sample in self.raw["samples"]:
@@ -287,9 +280,6 @@ class Config:
                 build_repo=entry.get("build_repo"),
                 build_context=entry.get("build_context"),
                 build_dockerfile=entry.get("build_dockerfile"),
-                amx_mechanism=entry.get("amx_mechanism"),
-                amx_extra_args=(entry.get("amx_extra_args") or "").strip() or None,
-                amx_caveat=entry.get("amx_caveat"),
             )
             for key, entry in self.raw["engines"].items()
         }
@@ -300,19 +290,6 @@ class Config:
             if engine.default:
                 return engine
         return next(iter(self.engines.values()))
-
-    @property
-    def amx_engine(self) -> Engine | None:
-        """The engine that can actually put work on the AMX tiles, if any.
-
-        Returns None rather than falling back to the default engine: an AMX
-        race against an engine that cannot dispatch AMX is not a race, and
-        callers must be forced to handle that rather than quietly measure noise.
-        """
-        for engine in self.engines.values():
-            if engine.amx_capable:
-                return engine
-        return None
 
     def engine(self, key: str) -> Engine:
         try:

@@ -4,7 +4,7 @@
 #
 # The container runs the Gradio app, but the DeepVariant pipeline itself still
 # runs as a SIBLING container on the host — that is why the Docker socket is
-# mounted. It keeps the NUMA topology and AMX units visible to DeepVariant
+# mounted. It keeps the NUMA topology and AVX-512 units visible to DeepVariant
 # rather than nesting containers.
 #
 # ./run_demo.sh is the simpler option and is what the booth runbook uses. This

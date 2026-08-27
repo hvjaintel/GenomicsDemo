@@ -19,7 +19,7 @@ Once Docker access is available and a real race has completed:
 
 ```bash
 ./scripts/preflight.sh --smoke          # confirm the pipeline runs for real
-./run_demo.sh                           # then run an AMX race in the UI
+./run_demo.sh                           # then run a core-scaling race in the UI
 ```
 
 Enable `demo_mode.record: true` in `config.yaml` before the race, and the

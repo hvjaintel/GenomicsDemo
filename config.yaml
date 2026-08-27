@@ -1,5 +1,5 @@
 # =============================================================================
-# Intel Xeon AMX Genomics Booth Demo — single source of truth for all tunables
+# Intel Xeon Genomics Booth Demo — single source of truth for all tunables
 # =============================================================================
 # Every value the demo depends on lives here. Nothing is hardcoded in the app.
 #
@@ -15,7 +15,7 @@
 
 demo:
   title: "Genomics on Built-In Xeon Acceleration"
-  subtitle: "DeepVariant germline variant calling · Intel AMX + AVX-512"
+  subtitle: "DeepVariant germline variant calling · Intel AVX-512"
   # Optional strapline shown at the right of the masthead. Left empty: it is a
   # branding line, not a measurement, and the masthead reads fine without one.
   # Both render sites omit their surrounding punctuation when this is blank.
@@ -44,7 +44,7 @@ paths:
 # Container engines
 # -----------------------------------------------------------------------------
 # All of these are TensorFlow/oneDNN based, so all of them honour the
-# ONEDNN_MAX_CPU_ISA ceiling that powers the AMX toggle.
+# ONEDNN_MAX_CPU_ISA ceiling set above.
 engines:
   # DEFAULT. Pullable straight from Docker Hub, no local build, works offline
   # once pulled. This is the BAM-in path used for live booth runs.
@@ -55,48 +55,14 @@ engines:
     path: "bam_in"
     default: true
 
-  # DeepVariant 1.5.0 — kept ONLY because it is the version on which AMX can
-  # actually be engaged. 1.5 runs a TF1 static graph, and the bf16 Grappler
-  # rewrite that lights up the AMX tiles is safe there. 1.6 moved to TF2/Keras
-  # and the same rewrite breaks the genotype likelihoods, which is why AMX is
-  # inert on 1.10 no matter what you set. See docs/AMX-FINDINGS.md.
-  #
-  # This needs no Intel fork and no local build: stock 1.5.0 exposes
-  # --call_variants_extra_args, and `config_string` is text_format.Parse'd
-  # straight into the same ConfigProto the Open-Omics fork edits by hand.
-  #
-  # READ BEFORE PUTTING THIS ON A BOOTH SCREEN: 1.10 with the tiles idle is
-  # 2.5x faster end to end than 1.5 with AMX fully engaged. This engine wins an
-  # AMX race and loses the race that matters. amx_caveat below is rendered
-  # next to any result produced with it, and is not optional.
-  google_deepvariant_15:
-    label: "DeepVariant 1.5.0 (AMX-capable, superseded)"
-    image: "google/deepvariant:1.5.0"
-    buildable: false
-    path: "bam_in"
-    default: false
-    # The supported flag that turns the AMX tiles on. Applied to the AMX-ON leg
-    # only; the AMX-OFF leg runs the same image with nothing added.
-    amx_mechanism: "bf16_graph_rewrite"
-    amx_extra_args: >-
-      config_string='graph_options: {rewrite_options: {auto_mixed_precision_onednn_bfloat16: ON}}'
-    amx_caveat: >-
-      Measured on DeepVariant 1.5.0. AMX only engages on this version. Stock
-      1.10.0 — with the AMX tiles idle — finishes the same genome 2.5x faster
-      than 1.5.0 with AMX fully engaged.
-
-
+  # Intel Open-Omics optimised DeepVariant. Must be BUILT locally from the
   # IntelLabs Dockerfile — there is no prebuilt image on Docker Hub.
   #
   # A "~2.7x faster call_variants" claim used to sit in this comment. It came
   # from the project brief, not from a measurement, and it is NOT supported by
-  # anything we have run. Measured on this box, stock DeepVariant 1.5.0 with
-  # the same bf16/AMX rewrite Open-Omics applies: call_variants 284.2 s -> 
-  # 240.1 s on HG002 chr20. That is 1.18x, not 2.7x.
-  #
-  # Open-Omics also parallelises postprocess_variants and raises the batch
-  # size, so the full fork may beat 1.18x — but until it is built and timed
-  # here, no multiplier belongs in this file. See docs/AMX-FINDINGS.md.
+  # anything we have run. Open-Omics parallelises postprocess_variants and
+  # raises the batch size, so it may well be quicker — but until it is built
+  # and timed on this box, no multiplier belongs in this file.
   open_omics_bams2vcf:
     label: "Open-Omics DeepVariant (Intel optimised, BAM-in)"
     image: "open-omics/bams2vcf:r1.5"
@@ -121,48 +87,32 @@ engines:
     default: false
 
 # -----------------------------------------------------------------------------
-# THE AMX TOGGLE — the money shot
+# THE oneDNN INSTRUCTION-SET CEILING
 # -----------------------------------------------------------------------------
-# The ONLY thing that changes between an AMX-ON and an AMX-OFF run is the
-# oneDNN instruction-set ceiling below. Same BAM, same reference, same shard
-# count, same NUMA policy, same image. That is what makes the delta honest and
-# attributable purely to AMX.
+# This demo runs on AVX-512, and pins it explicitly rather than leaving oneDNN
+# to pick a ceiling from whatever the CPU happens to advertise. Pinning it is
+# what makes a race attributable: both legs are known to have used the same
+# instruction set, and the runner parses the ISA back out of oneDNN's own
+# output to confirm it rather than assuming.
+#
+# Both entries below therefore select AVX-512. The two-key shape is retained
+# because the runner threads a single ISA selection through every code path;
+# it is a fixed setting now, not a toggle, and nothing in the UI offers a
+# choice.
+#
 # NOTE: the keys are `enabled`/`disabled` rather than `on`/`off` because YAML 1.1
 # parses bare on/off as booleans, which silently breaks the lookup.
 amx:
-  # WHAT THIS TOGGLE CAN AND CANNOT SHOW -- read docs/AMX-FINDINGS.md.
-  #
-  # Measured on this box (Xeon 6740P, HG002 chr20, DeepVariant 1.10.0):
-  #
-  #   AMX OFF (fp32, AVX-512)     call_variants  0.041 s / 100 examples
-  #   AMX ON  (fp32, ISA ceiling) call_variants  0.042 s / 100 examples
-  #   AMX ON  (bf16, real AMX)    call_variants  0.064-0.066 s / 100 examples
-  #
-  # Two facts follow, both verified rather than assumed:
-  #
-  #  1. Raising the ISA ceiling alone changes NOTHING. DeepVariant's shipped
-  #     model is fp32; AMX has no fp32 path; every convolution dispatches to
-  #     brgconv:avx512_core and the tiles stay idle. End-to-end: 0.98x.
-  #
-  #  2. Forcing bf16 (which does put work on the AMX tiles -- confirmed as
-  #     brgconv:avx512_core_amx) is ~1.6x SLOWER here AND breaks correctness:
-  #     the genotype likelihoods stop summing to one and DeepVariant's own
-  #     round_gls() raises ValueError, killing a post-processing worker.
-  #
-  # So the AMX race is kept as an EVIDENCE panel, not a headline. It reports
-  # what really happened, including "AMX permitted but never used". The booth
-  # headline is the core-scaling race below, which is a real Xeon story that
-  # needs no precision trade.
   enabled:
-    label: "AMX ON"
-    onednn_max_cpu_isa: "AVX512_CORE_AMX"
-    description: "AMX permitted (fp32 model -- tiles have no work to do)"
+    label: "AVX-512"
+    onednn_max_cpu_isa: "AVX512_CORE"
+    description: "AVX-512 vector units — the path this workload runs on"
     env:
       ONEDNN_DEFAULT_FP32_MATH_MODE: "F32"
   disabled:
-    label: "AMX OFF"
+    label: "AVX-512"
     onednn_max_cpu_isa: "AVX512_CORE"
-    description: "AVX-512 baseline, AMX tiles disabled"
+    description: "AVX-512 vector units — the path this workload runs on"
     env:
       ONEDNN_DEFAULT_FP32_MATH_MODE: "F32"
   # oneDNN prints the ISA it actually selected when verbose mode is on. We parse
@@ -173,11 +123,6 @@ amx:
   # Fail the run rather than quietly reporting a fake result if oneDNN ignored
   # the requested ceiling (e.g. unsupported value on this oneDNN build).
   fail_on_isa_mismatch: true
-  # Mount app/container_inject/sitecustomize.py to force TensorFlow to bf16.
-  # OFF by default because on stock DeepVariant 1.10 it is both slower and
-  # incorrect (see above). Set true only to reproduce that finding yourself --
-  # the run will hang after call_variants when the post-processing worker dies.
-  use_bf16_injection: false
 
 # ---------------------------------------------------------------------------
 # Core-scaling race -- the honest booth headline.
@@ -210,7 +155,7 @@ scaling:
 # -----------------------------------------------------------------------------
 # Compute / placement
 # -----------------------------------------------------------------------------
-# Held IDENTICAL across AMX ON and OFF. The runner reads one shared parameter
+# Held IDENTICAL across both legs of a race. The runner reads one shared parameter
 # set for both legs of a race so the comparison cannot drift.
 compute:
   # null => auto-detect with nproc. Override for a quieter, more repeatable run.

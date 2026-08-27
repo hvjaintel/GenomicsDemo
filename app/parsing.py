@@ -44,8 +44,8 @@ _PERCENT = re.compile(r"(\d{1,3})%")
 # A single oneDNN primitive execution, e.g.
 #   onednn_verbose,primitive,exec,cpu,convolution,brgconv:avx512_core,...
 # Field 5 is the primitive kind, field 6 the implementation that was chosen.
-# The implementation name is the ONLY place oneDNN tells you whether the AMX
-# tiles were really used; the ISA banner merely reports what was permitted.
+# The implementation name is the ONLY place oneDNN tells you which instruction
+# set really ran; the ISA banner merely reports what was permitted.
 _PRIMITIVE_EXEC = re.compile(
     r"onednn_verbose,(?:primitive,)?exec,\w+,(?P<kind>[\w_]+),(?P<impl>[^,]*),",
     re.IGNORECASE,
@@ -53,7 +53,7 @@ _PRIMITIVE_EXEC = re.compile(
 
 # Primitive kinds that carry the real neural-network arithmetic. Reorders and
 # the like are excluded: they are plumbing, and counting them would dilute the
-# "did AMX do the work?" signal.
+# "what actually did the maths?" signal.
 _COMPUTE_KINDS = {"convolution", "inner_product", "matmul", "deconvolution"}
 
 
@@ -61,46 +61,48 @@ _COMPUTE_KINDS = {"convolution", "inner_product", "matmul", "deconvolution"}
 class IsaUsage:
     """What oneDNN ACTUALLY dispatched, as opposed to what it was allowed to.
 
-    The distinction matters enormously. On a fp32 model oneDNN happily reports
-    an AMX-capable ISA and then runs every convolution on AVX-512, because AMX
-    has no fp32 path. Reporting only the banner would let the demo claim "AMX
-    confirmed" while the AMX tiles sat idle for the entire run.
+    The distinction matters. The ISA banner oneDNN prints at startup reports the
+    CPU's capability ceiling, not the code that ran; reading it alone would let
+    the demo claim an instruction set that never executed a single kernel. The
+    implementation name on each primitive is the real evidence, so that is what
+    gets counted and displayed.
     """
 
     impl_counts: dict[str, int] = field(default_factory=dict)
     compute_impl_counts: dict[str, int] = field(default_factory=dict)
     compute_total: int = 0
-    compute_amx: int = 0
+    compute_avx512: int = 0
 
     @property
-    def amx_used(self) -> bool:
-        return self.compute_amx > 0
+    def avx512_used(self) -> bool:
+        return self.compute_avx512 > 0
 
     @property
-    def amx_fraction(self) -> float:
+    def avx512_fraction(self) -> float:
         if not self.compute_total:
             return 0.0
-        return self.compute_amx / self.compute_total
+        return self.compute_avx512 / self.compute_total
 
     @property
     def top_impls(self) -> list[tuple[str, int]]:
         """Busiest COMPUTE implementations. Reorders are excluded on purpose:
-        they are data shuffling, and listing them alongside convolutions makes
-        it look like AMX had work it declined."""
+        they are data shuffling, and listing them next to the convolutions
+        would overstate how much real maths went through a given code path."""
         return sorted(self.compute_impl_counts.items(), key=lambda kv: -kv[1])[:4]
 
     def summary(self) -> str:
         if not self.compute_total:
             return "no oneDNN compute primitives observed"
-        if not self.compute_amx:
-            names = ", ".join(f"{impl}×{n}" for impl, n in self.top_impls if impl)
+        names = ", ".join(f"{impl}×{n}" for impl, n in self.top_impls if impl)
+        if not self.compute_avx512:
             return (
-                f"0 of {self.compute_total} compute primitives used AMX "
+                f"0 of {self.compute_total} compute primitives used AVX-512 "
                 f"({names or 'implementation not reported'})"
             )
         return (
-            f"{self.compute_amx} of {self.compute_total} compute primitives "
-            f"used AMX ({self.amx_fraction:.0%})"
+            f"{self.compute_avx512} of {self.compute_total} compute primitives "
+            f"used AVX-512 ({self.avx512_fraction:.0%}"
+            f"{'; ' + names if names else ''})"
         )
 
 
@@ -155,8 +157,8 @@ class LogParser:
             if kind in _COMPUTE_KINDS:
                 usage.compute_total += 1
                 usage.compute_impl_counts[impl] = usage.compute_impl_counts.get(impl, 0) + 1
-                if "amx" in impl.lower():
-                    usage.compute_amx += 1
+                if "avx512" in impl.lower():
+                    usage.compute_avx512 += 1
             return  # verbose exec lines carry nothing else we need
 
         for name, pattern in _STAGE_PATTERNS.items():
@@ -201,6 +203,22 @@ class LogParser:
         return sum(s.percent for s in self.stages.values()) / len(STAGES)
 
 
+def _normalise_isa(text: str) -> str:
+    """Strip punctuation so 'AVX-512' and 'AVX512_CORE' compare on equal terms.
+
+    oneDNN writes the banner as 'Intel AVX-512 with ...' but the ceiling we set
+    is 'AVX512_CORE'. A plain substring test only matches by accident, via the
+    'AVX512BW' that happens to appear later in the banner. Normalising makes the
+    comparison mean what it says.
+    """
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+# ISA families the check distinguishes between. Comparing family membership
+# rather than exact strings keeps this working across oneDNN banner wordings.
+_ISA_FAMILIES = ("amx", "avx512", "avx2")
+
+
 def isa_is_consistent(requested_ceiling: str, reported_isa: str | None) -> bool | None:
     """Check the ISA oneDNN actually selected against the ceiling we requested.
 
@@ -209,10 +227,9 @@ def isa_is_consistent(requested_ceiling: str, reported_isa: str | None) -> bool 
     """
     if not reported_isa:
         return None
-    lowered = reported_isa.lower()
-    mentions_amx = "amx" in lowered
-    wants_amx = "amx" in requested_ceiling.lower()
-    return mentions_amx == wants_amx
+    got = _normalise_isa(reported_isa)
+    want = _normalise_isa(requested_ceiling)
+    return all((family in got) == (family in want) for family in _ISA_FAMILIES)
 
 
 @dataclass

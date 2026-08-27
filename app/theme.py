@@ -154,8 +154,8 @@ def build_css(cfg: Config) -> str:
 :root {{
   --intel-blue: {accent};
   --intel-bright: {accent_bright};
-  --amx-on: #00E08F;
-  --amx-off: #FF9E3D;
+  --accent-ok: #00E08F;
+  --accent-warn: #FF9E3D;
   --ink: #E8EEF5;
   --ink-dim: #8FA3BA;
   --panel: #111823;
@@ -218,14 +218,14 @@ def build_css(cfg: Config) -> str:
   display: inline-block; padding: 6px 16px; border-radius: 999px;
   font-weight: 700; font-size: 0.95rem; border: 1px solid var(--edge);
 }}
-.pill.on {{ background: rgba(0,224,143,0.14); color: var(--amx-on); border-color: var(--amx-on); }}
-.pill.off {{ background: rgba(255,158,61,0.14); color: var(--amx-off); border-color: var(--amx-off); }}
-.pill.warn {{ background: rgba(255,158,61,0.14); color: var(--amx-off); border-color: var(--amx-off); }}
+.pill.on {{ background: rgba(0,224,143,0.14); color: var(--accent-ok); border-color: var(--accent-ok); }}
+.pill.off {{ background: rgba(255,158,61,0.14); color: var(--accent-warn); border-color: var(--accent-warn); }}
+.pill.warn {{ background: rgba(255,158,61,0.14); color: var(--accent-warn); border-color: var(--accent-warn); }}
 .pill.bad {{ background: rgba(255,90,90,0.14); color: #FF6B6B; border-color: #FF6B6B; }}
 
 /* Anything estimated rather than measured must look different from real data. */
 .illustrative {{
-  border-left: 4px solid var(--amx-off);
+  border-left: 4px solid var(--accent-warn);
   background: rgba(255,158,61,0.07);
   padding: 12px 18px; border-radius: 0 10px 10px 0;
   color: #FFD9A8; font-size: 0.95rem;
@@ -269,7 +269,7 @@ def build_css(cfg: Config) -> str:
   background: linear-gradient(90deg, var(--intel-blue), var(--intel-bright));
   transition: width .35s ease;
 }}
-.stage-fill.done {{ background: linear-gradient(90deg, #00A86B, var(--amx-on)); }}
+.stage-fill.done {{ background: linear-gradient(90deg, #00A86B, var(--accent-ok)); }}
 .stage-time {{ width: 110px; text-align: right; font-variant-numeric: tabular-nums;
   font-size: 1.1rem; color: var(--ink-dim); font-weight: 600; }}
 
@@ -347,9 +347,9 @@ def build_css(cfg: Config) -> str:
 .dna-panel.idle .dna-helix {{ opacity: 0.35; }}
 .dna-panel.quiet .dna-helix {{ opacity: 0.55; }}
 .dna-panel.done .dna-node.a, .dna-panel.done .dna-node.b {{
-  background: var(--amx-on); box-shadow: 0 0 10px rgba(0,224,143,0.5);
+  background: var(--accent-ok); box-shadow: 0 0 10px rgba(0,224,143,0.5);
 }}
-.dna-panel.done .dna-rung {{ background: var(--amx-on); }}
+.dna-panel.done .dna-rung {{ background: var(--accent-ok); }}
 .dna-panel.failed .dna-node.a, .dna-panel.failed .dna-node.b {{
   background: #FF6B6B; box-shadow: none;
 }}
@@ -359,7 +359,7 @@ def build_css(cfg: Config) -> str:
   font-size: 1rem; color: var(--ink-dim); line-height: 1.45;
 }}
 .dna-panel.running .dna-caption {{ color: var(--ink); }}
-.dna-panel.quiet .dna-caption {{ color: var(--amx-off); }}
+.dna-panel.quiet .dna-caption {{ color: var(--accent-warn); }}
 .dna-panel.failed .dna-caption {{ color: #FF8F8F; }}
 
 @media (prefers-reduced-motion: reduce) {{
@@ -374,18 +374,18 @@ def build_css(cfg: Config) -> str:
   background: var(--panel); border: 1px solid var(--edge);
   border-radius: 16px; padding: 20px 24px; margin-bottom: 16px;
 }}
-.race-lane.on {{ border-color: var(--amx-on); box-shadow: 0 0 26px rgba(0,224,143,0.14); }}
-.race-lane.off {{ border-color: var(--amx-off); }}
+.race-lane.on {{ border-color: var(--accent-ok); box-shadow: 0 0 26px rgba(0,224,143,0.14); }}
+.race-lane.off {{ border-color: var(--accent-warn); }}
 .race-head {{ display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 12px; }}
 .race-label {{ font-size: 1.6rem; font-weight: 800; }}
-.race-label.on {{ color: var(--amx-on); }}
-.race-label.off {{ color: var(--amx-off); }}
+.race-label.on {{ color: var(--accent-ok); }}
+.race-label.off {{ color: var(--accent-warn); }}
 .race-clock {{ font-size: 2.6rem; font-weight: 800; font-variant-numeric: tabular-nums; }}
 .race-track {{ height: 34px; background: var(--panel-2); border-radius: 999px;
   border: 1px solid var(--edge); overflow: hidden; }}
 .race-fill {{ height: 100%; border-radius: 999px; transition: width .4s ease; }}
-.race-fill.on {{ background: linear-gradient(90deg, #00A86B, var(--amx-on)); }}
-.race-fill.off {{ background: linear-gradient(90deg, #C4701F, var(--amx-off)); }}
+.race-fill.on {{ background: linear-gradient(90deg, #00A86B, var(--accent-ok)); }}
+.race-fill.off {{ background: linear-gradient(90deg, #C4701F, var(--accent-warn)); }}
 .race-meta {{ display: flex; gap: 26px; margin-top: 12px; color: var(--ink-dim); font-size: 1rem; }}
 
 .speedup-card {{

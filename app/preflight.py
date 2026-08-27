@@ -66,28 +66,20 @@ class PreflightReport:
         return [c.as_row() for c in self.checks]
 
 
-def _check_amx(snap: SystemSnapshot) -> Check:
+def _check_avx512(snap: SystemSnapshot) -> Check:
     cpu = snap.cpu
-    if cpu.has_amx and cpu.has_avx512:
+    if cpu.has_avx512:
         return Check(
             "Built-in acceleration",
             Status.OK,
             f"{cpu.model} — {', '.join(cpu.present_accel_flags)}",
         )
-    if cpu.has_avx512:
-        return Check(
-            "Built-in acceleration",
-            Status.FAIL,
-            f"{cpu.model} exposes AVX-512 but NOT AMX",
-            "The AMX toggle cannot demonstrate anything on this CPU. "
-            "Use a Xeon with amx_tile + amx_bf16 (Sapphire Rapids or newer).",
-            blocking=True,
-        )
     return Check(
         "Built-in acceleration",
         Status.FAIL,
-        f"{cpu.model} exposes neither AMX nor AVX-512",
-        "This demo requires an Intel Xeon with AMX support.",
+        f"{cpu.model} does not expose AVX-512",
+        "This demo runs DeepVariant on the CPU's AVX-512 vector units. "
+        "Use an Intel Xeon with avx512f.",
         blocking=True,
     )
 
@@ -382,7 +374,7 @@ def _check_trace(cfg: Config) -> Check:
 def run_preflight(cfg: Config) -> PreflightReport:
     snap = snapshot(cfg)
     checks: list[Check] = [
-        _check_amx(snap),
+        _check_avx512(snap),
         _check_topology(snap),
         _check_docker(snap),
         _check_image(cfg, snap),
@@ -461,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     width = max(len(c.name) for c in report.checks) + 2
     print()
     print("=" * 78)
-    print("  PRE-FLIGHT — Intel Xeon AMX Genomics Demo")
+    print("  PRE-FLIGHT — Intel Xeon Genomics Demo")
     print("=" * 78)
     for check in report.checks:
         print(f"{check.status.icon}  {check.name:<{width}} {check.detail}")

@@ -5,10 +5,11 @@ server and proves three things to a live audience:
 
 1. Deep-learning variant calling runs fast on standard Xeon CPUs using the processor's
    **built-in vector units (AVX-512)** — no add-in cards, no GPU.
-2. **It scales across Xeon cores**: HG002 chr20 takes ~343 s on 16 cores and ~123 s on all
-   192 threads — a measured **2.8×** (2.78× and 2.86× on two separate races), with both
-   legs calling exactly the same 210,390 variants. Same arithmetic, more cores, no
-   trade-off.
+2. **It scales across Xeon cores**: HG002 chr20 takes **339 s on 16 cores** and **127 s on
+   96 cores** — a measured **2.66×**, with both legs calling exactly the same 210,390
+   variants. This is a *core-to-core* comparison: both legs get whole physical cores and
+   neither gets a hyperthread sibling, so the number is core scaling and nothing else.
+   Same arithmetic, more cores, no trade-off.
 3. It does so on a **quiet, air-cooled, bench-deployable** server — deploy where the science
    happens, not in a loud data hall.
 
@@ -50,8 +51,10 @@ This demo shows real numbers or it shows nothing.
 
 > We run the same genome, the same container, the same binary and the same 192 shards
 > twice. The only thing we change is how many of this server's cores the job is allowed to
-> touch — 16 cores, then all 192 threads. Nothing else moves: same data, same instruction
-> set, same everything. Both runs call exactly the same 210,390 variants, so this isn't a
+> touch — 16 cores, then 96 cores. Both legs get whole physical cores; neither gets a
+> hyperthread, so what you are watching is core scaling and not SMT. Nothing else moves:
+> same data, same instruction set, same everything. Both runs call exactly the same
+> 210,390 variants, so this isn't a
 > quality trade — it's the same work, finished sooner. That's the point of a server like
 > this: **the throughput is already in the box, and it scales.**
 
@@ -120,7 +123,23 @@ Re-run after the scratch-space fix: **25m 46s**. Two runs one second apart.
 
 ### Measured core scaling
 
-The same genome pinned to 16 of the 96 physical cores (`--cores 0-15`):
+**chr20, core to core** — the race the demo actually runs. Both legs pinned to whole
+physical cores, no SMT siblings on either side:
+
+| Leg | cpuset | Wall clock |
+|---|---|---|
+| 96 cores | `0-95` | **127.4 s** |
+| 16 cores | `0-15` | **339.4 s** |
+| **Ratio** | | **2.66×** |
+
+Both legs called the identical 210,390 variants.
+
+An earlier version of this race put 16 cores against all 192 *threads* and reported
+2.78–2.86×. That confounded two variables — core count and SMT — so a reader could
+credit cores for a win that was partly hyperthreading. The honest core-to-core figure
+is **lower**, and it is the one we quote.
+
+**Whole genome, 16 cores vs 192 threads** (historical; includes SMT on the fast leg):
 
 | Stage | 192 threads | 16 cores |
 |---|---|---|
@@ -141,6 +160,9 @@ wall clock and nothing else.
 Scaling is sublinear (4.85x from 6x the cores, 12x the threads) because
 `make_examples` is I/O- and Python-bound and half the 192 are SMT siblings rather
 than cores. The demo says so rather than rounding it up to "12x".
+
+Note this WGS pair predates the switch to a core-to-core race, so its fast leg is
+192 threads. The chr20 table above is the comparison the app now runs.
 
 ---
 
@@ -341,9 +363,9 @@ Put the browser full screen (F11). Leave the **Status** tab up between visitors.
 
 1. **Status** — "96 cores, a terabyte of RAM, and the accelerators are already in the CPU."
 2. **Dataset** — pick *HG002 chr20*. "A real human chromosome at 35x depth."
-3. **Scaling race** — press **RACE: 16 cores vs all 192 threads**.
+3. **Scaling race** — press **RACE: 16 cores vs 96 cores**.
 4. Watch the 16-core leg run first (~6 min), then the full machine overtake it (~2 min).
-5. **Speedup card** lands: "Xeon scales: all 192 threads vs 16 cores — ~2.8×", alongside the
+5. **Speedup card** lands: "Xeon scales: 96 cores vs 16 cores — ~2.7×", alongside the
    variant counts proving both legs produced the same answer.
 6. **Results** — same variant counts either way. Speed without an accuracy trade.
 

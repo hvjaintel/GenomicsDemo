@@ -137,12 +137,23 @@ def build_legs(cfg: Config, spec: RunSpec, mode: str = "scaling") -> tuple[Leg, 
             "scaling.baseline_cpuset is not set in config.yaml — cannot run a "
             "core-scaling race without knowing what the reduced core budget is."
         )
+    # The fast leg is pinned too. Leaving it unpinned would hand it every SMT
+    # sibling as well, making this a cores+hyperthreading race sold as a core
+    # race -- two variables, one claim. Both legs now get whole cores only.
+    full_cpuset = scaling.get("full_cpuset")
+    if not full_cpuset:
+        raise SystemExit(
+            "scaling.full_cpuset is not set in config.yaml — refusing to race an "
+            "unpinned leg against a pinned one, because the win could not then "
+            "be attributed to the core count alone."
+        )
     # Both legs keep the same instruction-set ceiling. It is held constant, so
     # it cannot contaminate the core-scaling result either way.
     amx_on = True
+    full = dataclasses.replace(spec, cpuset=full_cpuset)
     baseline = dataclasses.replace(spec, cpuset=cpuset)
     return (
-        Leg("full", scaling.get("full_label", "all cores"), spec, amx_on),
+        Leg("full", scaling.get("full_label", f"cores {full_cpuset}"), full, amx_on),
         Leg("limited", scaling.get("baseline_label", f"cores {cpuset}"), baseline, amx_on),
     )
 

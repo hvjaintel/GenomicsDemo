@@ -37,17 +37,20 @@ def _expected_runtime(sample, cfg, cores: str | None) -> tuple[float | None, str
     figure recorded under different conditions.
     """
     illustrative = getattr(sample, "illustrative", False)
-    if not cores:
-        return sample.runtime_fast_s, "estimate" if illustrative else "measured previously"
+    label = "estimate" if illustrative else "measured previously"
+    scaling = (cfg.raw.get("scaling") or {})
 
-    baseline = getattr(getattr(cfg, "scaling", None), "baseline_cpuset", None)
-    if baseline is None:
-        baseline = (cfg.raw.get("scaling") or {}).get("baseline_cpuset")
-    if baseline and cores == baseline:
-        slow = sample.runtime_slow_s
-        if slow:
-            label = "estimate" if illustrative else "measured previously"
-            return slow, f"{label}, {cores}"
+    # The recorded runtimes are per-leg: runtime_fast_s was measured on
+    # scaling.full_cpuset and runtime_slow_s on scaling.baseline_cpuset. An
+    # unpinned run uses every SMT sibling too, which is neither leg, so there is
+    # nothing on file for it -- say so rather than quote the 96-core figure.
+    if not cores:
+        return None, ""
+
+    if cores == scaling.get("full_cpuset") and sample.runtime_fast_s:
+        return sample.runtime_fast_s, f"{label}, {cores}"
+    if cores == scaling.get("baseline_cpuset") and sample.runtime_slow_s:
+        return sample.runtime_slow_s, f"{label}, {cores}"
     return None, ""
 
 

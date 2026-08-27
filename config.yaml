@@ -133,24 +133,38 @@ amx:
 # precision trade, and shows the thing that is actually true about this
 # machine: variant calling scales across Xeon cores.
 scaling:
-  # Baseline core budget. Kept as a cpuset string so it is exactly what gets
-  # passed to Docker -- no arithmetic between what is configured and what runs.
+  # A CORE-TO-CORE race. Both legs get whole physical cores and neither gets
+  # any SMT sibling, so the only thing that varies is how many cores are in
+  # play -- 16 versus 96. An earlier version raced 16 cores against all 192
+  # hardware threads, which confounded two variables (core count AND SMT) and
+  # let a reader credit cores for a win that was partly hyperthreading.
   #
-  # Measured on this box (HG002 chr20, 192 shards, both legs called exactly
-  # 210,390 variants -- identical output, so nothing was traded for the speed):
+  # On this box `lscpu -p=CPU,CORE` shows CPUs 0-95 are one thread per physical
+  # core and 96-191 are their siblings, so "0-95" is exactly 96 cores with SMT
+  # left on the table. Verified, not assumed -- there is a test for it.
   #
-  #    16 cores   342.7-346.6 s -> 2.78-2.86x  (two independent races)
-  #    48 cores   161.7 s    ->  1.35x
-  #    96 cores   129.5 s    ->  1.06x
-  #   192 threads 119.6 s    ->  1.00x  (reference)
+  # Kept as cpuset strings so what is configured is exactly what Docker is
+  # passed -- no arithmetic between the config and the run.
   #
-  # Scaling is sublinear past ~96 because make_examples is I/O- and
-  # Python-bound, and the last 96 are SMT siblings rather than cores. 16 is
-  # chosen as the baseline because it gives the largest honest ratio; the
-  # slower leg takes about six minutes, so pace booth visitors accordingly.
+  # MEASURED on this box (HG002 chr20, 192 shards, both legs called exactly
+  # the same 210,390 variants -- identical output, nothing traded for speed):
+  #
+  #    16 cores  (0-15)   339.4 s
+  #    96 cores  (0-95)   127.4 s
+  #    ratio              2.66x
+  #
+  # For the record, the earlier 16-cores-vs-192-threads race reported
+  # 2.78-2.86x. The honest core-to-core number is LOWER, because roughly 7% of
+  # that headline was SMT rather than cores. We would rather quote 2.66x and
+  # have it mean exactly what it says.
+  #
+  # Scaling is sublinear because make_examples is I/O- and Python-bound, not
+  # because the cores run out of steam. The slower leg takes about six minutes,
+  # so pace booth visitors accordingly.
   baseline_cpuset: "0-15"
   baseline_label: "16 cores"
-  full_label: "all 192 threads"
+  full_cpuset: "0-95"
+  full_label: "96 cores"
 
 # -----------------------------------------------------------------------------
 # Compute / placement
@@ -308,10 +322,15 @@ samples:
     blurb: "The live booth run. Whole chromosome 20 at 35x depth."
     # MEASURED on this box, not estimated. Core-scaling race, 192 shards,
     # 210,390 variants called identically by both legs:
-    #   16 cores  342.7-346.6 s    48 cores  161.7 s
-    #   96 cores  129.5 s          192 thr   119.6-123.2 s
-    runtime_fast_s: 123
-    runtime_slow_s: 345
+    # These drive the progress-bar estimates, so they track the two legs the
+    # race actually runs: 96 physical cores and 16 physical cores.
+    #   96 cores (0-95)  127.4 s   MEASURED, core-to-core race
+    #   16 cores (0-15)  339.4 s   MEASURED, same race
+    #                    342.7-346.6 s from two earlier races -- consistent
+    # Historical, for scale (these included SMT and are NOT what the race runs):
+    #   48 cores 161.7 s | 192 threads 119.6-123.2 s
+    runtime_fast_s: 127
+    runtime_slow_s: 341
     illustrative: false
     show_in_booth: true
 

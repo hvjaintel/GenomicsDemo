@@ -241,7 +241,7 @@ def render_dataset(cfg: Config, sample_id: str | None) -> str:
             metric("Region", sample.regions or "whole genome", small=True),
             metric("Shards", f"{cfg.num_shards}", note="one per hardware thread"),
             metric(
-                f"Expected — {cfg.scaling.get('full_label', 'all cores')}",
+                f"Expected — {cfg.scaling.get('full_label', 'more cores')}",
                 fmt_duration(sample.runtime_fast_s),
                 note="estimate — for pacing only" if sample.illustrative else "measured on this box",
             ),
@@ -618,7 +618,7 @@ def run_race(cfg: Config, sample_id: str) -> Iterator[tuple]:
             return leg.label
         return cfg.scaling.get(
             "full_label" if full else "baseline_label",
-            "all cores" if full else "reduced cores",
+            "more cores" if full else "reduced cores",
         )
 
     def lanes_html() -> str:
@@ -652,7 +652,7 @@ def run_race(cfg: Config, sample_id: str) -> Iterator[tuple]:
     yield lanes_html(), "", ""
 
     # Baseline first so the audience watches the slow leg finish, then sees the
-    # full machine beat it — the reveal lands better in that order.
+    # faster leg beat it — the reveal lands better in that order.
     for amx_on in (False, True):
         leg = leg_for(amx_on)
         if use_replay:
@@ -698,7 +698,7 @@ def _race_verdict(
             '<div class="metric-note">Both legs must finish before a speedup can be reported.</div></div>'
         )
 
-    fast_label = cfg.scaling.get("full_label", "all cores")
+    fast_label = cfg.scaling.get("full_label", "more cores")
     slow_label = cfg.scaling.get("baseline_label", "reduced cores")
 
     if not on.succeeded or not off.succeeded:
@@ -743,7 +743,8 @@ def _race_verdict(
             )
 
     cards = [
-        metric(fast_label, fmt_duration(on.wall_clock_s), note="full machine"),
+        metric(fast_label, fmt_duration(on.wall_clock_s),
+               note=f"--cpuset-cpus {cfg.scaling.get('full_cpuset', '')}"),
         metric(slow_label, fmt_duration(off.wall_clock_s),
                note=f"--cpuset-cpus {cfg.scaling.get('baseline_cpuset', '')}"),
         metric("Time saved", fmt_duration((off.wall_clock_s or 0) - (on.wall_clock_s or 0))),
@@ -826,7 +827,7 @@ def _concordance_note(cfg: Config) -> str:
     if on and off and on.succeeded and off.succeeded and on.variant_counts and off.variant_counts:
         a, b = on.variant_counts.total, off.variant_counts.total
         delta = abs(a - b) / max(a, b, 1) * 100.0
-        fast_label = cfg.scaling.get("full_label", "all cores")
+        fast_label = cfg.scaling.get("full_label", "more cores")
         slow_label = cfg.scaling.get("baseline_label", "reduced cores")
         verdict = (
             "Both legs produced effectively identical call sets — the speedup "
@@ -1024,10 +1025,15 @@ def build_app(cfg: Config) -> gr.Blocks:
                     "Two runs, back to back, on the same data with the same binary, "
                     "shard count and instruction-set settings. The only difference is "
                     "how many cores the container may use: "
-                    f"<span class='mono'>{escape(str(cfg.scaling.get('full_label', 'all cores')))}</span> versus "
+                    f"<span class='mono'>{escape(str(cfg.scaling.get('full_label', 'more cores')))}</span> "
+                    "(<span class='mono'>--cpuset-cpus "
+                    f"{escape(str(cfg.scaling.get('full_cpuset', '')))}</span>) versus "
                     f"<span class='mono'>{escape(str(cfg.scaling.get('baseline_label', 'reduced cores')))}</span> "
                     "(<span class='mono'>--cpuset-cpus "
                     f"{escape(str(cfg.scaling.get('baseline_cpuset', '')))}</span>). "
+                    "This is a core-to-core comparison: both legs get whole physical "
+                    "cores and neither gets a hyperthread sibling, so the result is "
+                    "core scaling and nothing else. "
                     "Both legs call the same variants — nothing is traded for the speed."
                     "</div>"
                 )
@@ -1038,7 +1044,7 @@ def build_app(cfg: Config) -> gr.Blocks:
                 )
                 race_btn = gr.Button(
                     f"▶  RACE: {cfg.scaling.get('baseline_label', 'few cores')} "
-                    f"vs {cfg.scaling.get('full_label', 'all cores')}",
+                    f"vs {cfg.scaling.get('full_label', 'more cores')}",
                     variant="primary",
                     elem_classes="start-button",
                 )

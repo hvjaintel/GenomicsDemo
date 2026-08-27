@@ -10,6 +10,7 @@ import copy
 import dataclasses
 import gzip
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -419,14 +420,18 @@ def test_scaling_legs_differ_only_by_cpuset(cfg, spec, tmp_path):
     full_cmd = runner.build_command(full.spec, full.amx_on, tmp_path, verbose_isa=False)
     lim_cmd = runner.build_command(limited.spec, limited.amx_on, tmp_path, verbose_isa=False)
 
-    assert "--cpuset-cpus" not in full_cmd
+    # BOTH legs are pinned now -- the race is core-to-core, so the fast leg
+    # must not be allowed to quietly collect the SMT siblings as well.
+    assert "--cpuset-cpus" in full_cmd
     assert "--cpuset-cpus" in lim_cmd
-    idx = lim_cmd.index("--cpuset-cpus")
-    assert lim_cmd[idx + 1] == cfg.scaling["baseline_cpuset"]
+    full_idx = full_cmd.index("--cpuset-cpus")
+    lim_idx = lim_cmd.index("--cpuset-cpus")
+    assert full_cmd[full_idx + 1] == cfg.scaling["full_cpuset"]
+    assert lim_cmd[lim_idx + 1] == cfg.scaling["baseline_cpuset"]
 
     # Strip the one permitted difference; everything else must match exactly.
-    stripped = lim_cmd[:idx] + lim_cmd[idx + 2:]
-    assert stripped == full_cmd
+    assert (full_cmd[:full_idx] + full_cmd[full_idx + 2:]
+            == lim_cmd[:lim_idx] + lim_cmd[lim_idx + 2:])
 
 
 def test_scaling_legs_hold_the_isa_constant(cfg, spec):
@@ -1149,13 +1154,21 @@ def _wgs_sample(cfg):
     return next(s for s in cfg.samples if s.id == "wgs")
 
 
-def test_expected_runtime_uses_the_all_core_figure_when_unpinned():
+def test_expected_runtime_declines_to_guess_for_an_unpinned_run():
+    """Once the race became core-to-core, runtime_fast_s stopped meaning "all CPUs".
+
+    It is the 96-physical-core figure. An unpinned run also gets all 96 SMT
+    siblings, so it is a third configuration with nothing on file. Quoting the
+    96-core number for it would be exactly the "figure recorded under different
+    conditions" the estimator exists to avoid.
+    """
     from app.config import Config
     from app.run import _expected_runtime
 
     cfg = Config.load()
-    est, _ = _expected_runtime(_wgs_sample(cfg), cfg, None)
-    assert est == _wgs_sample(cfg).runtime_fast_s
+    est, qualifier = _expected_runtime(_wgs_sample(cfg), cfg, None)
+    assert est is None
+    assert qualifier == ""
 
 
 def test_expected_runtime_does_not_quote_all_core_time_for_a_pinned_run():
@@ -1391,3 +1404,104 @@ def test_isa_consistency_accepts_the_real_hyphenated_avx512_banner():
         "Intel AVX-512 with AVX512BW, AVX512VL, and AVX512DQ extensions",
     ) is True
     assert isa_is_consistent("AVX512_CORE", "Intel AVX2") is False
+
+
+# ---------------------------------------------------------------------------
+# The race is CORE to CORE. No leg may be handed an SMT sibling, and no leg may
+# be left unpinned -- either would let hyperthreading masquerade as core scaling.
+# ---------------------------------------------------------------------------
+
+
+def _expand_cpuset(cpuset: str) -> list[int]:
+    out: list[int] = []
+    for part in cpuset.split(","):
+        if "-" in part:
+            lo, hi = part.split("-")
+            out.extend(range(int(lo), int(hi) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
+def _cpu_to_core() -> dict[int, int]:
+    """Map logical CPU -> physical core id, from lscpu."""
+    import subprocess
+
+    proc = subprocess.run(
+        ["lscpu", "-p=CPU,CORE"], capture_output=True, text=True, check=True
+    )
+    mapping = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        cpu, core = line.split(",")[:2]
+        mapping[int(cpu)] = int(core)
+    return mapping
+
+
+def test_both_race_legs_are_pinned(cfg, spec):
+    """An unpinned leg would silently collect every SMT sibling on the box."""
+    full, limited = build_legs(cfg, spec)
+    assert full.spec.cpuset, "the fast leg must be pinned, not left to take the whole machine"
+    assert limited.spec.cpuset
+
+
+def test_race_refuses_to_run_with_an_unpinned_fast_leg(cfg, spec):
+    raw = copy.deepcopy(cfg.raw)
+    raw["scaling"].pop("full_cpuset", None)
+    crippled = Config(raw, Path("test"))
+    with pytest.raises(SystemExit, match="unpinned leg"):
+        build_legs(crippled, spec)
+
+
+@pytest.mark.skipif(shutil.which("lscpu") is None, reason="needs lscpu")
+def test_neither_leg_is_given_an_smt_sibling(cfg, spec):
+    """Every CPU in a leg must be a distinct physical core.
+
+    This is what makes the race core-to-core. If a cpuset contained both
+    threads of one core, the extra "core" would be hyperthreading and the
+    headline would credit cores for a win they did not produce.
+    """
+    cpu_to_core = _cpu_to_core()
+    full, limited = build_legs(cfg, spec)
+
+    for leg in (full, limited):
+        cpus = _expand_cpuset(leg.spec.cpuset)
+        cores = [cpu_to_core[c] for c in cpus]
+        assert len(set(cores)) == len(cores), (
+            f"leg {leg.key!r} (cpuset {leg.spec.cpuset}) contains two threads of "
+            f"the same physical core — that is SMT, not another core"
+        )
+        assert len(cores) == leg.spec.core_count
+
+
+@pytest.mark.skipif(shutil.which("lscpu") is None, reason="needs lscpu")
+def test_the_fast_leg_uses_every_physical_core(cfg):
+    """96 cores is claimed on screen, so all 96 must actually be in the cpuset."""
+    cpu_to_core = _cpu_to_core()
+    total_cores = len(set(cpu_to_core.values()))
+    full_cpus = _expand_cpuset(cfg.scaling["full_cpuset"])
+    assert len(full_cpus) == total_cores
+
+
+def test_the_scaling_labels_do_not_promise_threads(cfg):
+    """The legs are core budgets; the labels must not say "threads"."""
+    for key in ("full_label", "baseline_label"):
+        assert "thread" not in str(cfg.scaling[key]).lower()
+
+
+def test_expected_runtime_is_matched_to_the_leg_it_was_measured_on(cfg):
+    """Recorded runtimes are per-cpuset; quoting one for another leg is a lie."""
+    from app.run import _expected_runtime
+
+    sample = cfg.sample("chr20")
+    fast, _ = _expected_runtime(sample, cfg, cfg.scaling["full_cpuset"])
+    slow, _ = _expected_runtime(sample, cfg, cfg.scaling["baseline_cpuset"])
+    assert fast == sample.runtime_fast_s
+    assert slow == sample.runtime_slow_s
+    assert slow > fast
+
+    # An unpinned run gets every SMT sibling as well -- that is neither leg, so
+    # nothing on file applies and the honest answer is "no estimate".
+    assert _expected_runtime(sample, cfg, None)[0] is None
+    assert _expected_runtime(sample, cfg, "0-7")[0] is None

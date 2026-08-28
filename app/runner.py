@@ -73,6 +73,12 @@ class RunSpec:
     numa_node: int = 0
     shm_size: str | None = "16g"
     memory: str | None = None
+    # Docker --network. "none" gives the container no network interface at all,
+    # which is the default because the pipeline provably does not need one (the
+    # model ships inside the image) and because a visitor's genomic data must
+    # not be able to leave this box. Part of the fingerprint: two legs that
+    # differed here would not be comparable.
+    network: str | None = "none"
     ulimit_nofile: str | None = "65536:524288"
     # Docker --cpuset-cpus for this leg. This is the ONE permitted difference
     # in a core-scaling race, so it is excluded from the fingerprint.
@@ -113,6 +119,9 @@ class RunSpec:
             "model_type": self.model_type,
             "numa_policy": self.numa_policy,
             "numa_node": self.numa_node,
+            # Network isolation is held constant: a leg with a network and a
+            # leg without are not the same experiment.
+            "network": self.network,
         }
         return json.dumps(payload, sort_keys=True)
 
@@ -234,6 +243,7 @@ class DeepVariantRunner:
             engine_image=engine.image,
             numa_policy=compute.get("numa_policy", "interleave_all"),
             numa_node=int(compute.get("numa_node", 0)),
+            network=compute.get("docker_network", "none"),
             shm_size=compute.get("docker_shm_size"),
             memory=compute.get("docker_memory"),
             ulimit_nofile=compute.get("docker_ulimit_nofile"),
@@ -323,6 +333,8 @@ class DeepVariantRunner:
         ]
         for key, value in env.items():
             cmd += ["-e", f"{key}={value}"]
+        if spec.network:
+            cmd += ["--network", str(spec.network)]
         if spec.shm_size:
             cmd += ["--shm-size", str(spec.shm_size)]
         if spec.memory:

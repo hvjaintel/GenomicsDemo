@@ -181,6 +181,16 @@ compute:
   #   bind_node       -> numactl --cpunodebind=N --membind=N (set numa_node)
   numa_policy: "interleave_all"
   numa_node: 0
+  # Container networking. "none" = no network interface inside the container
+  # at all. This is the default and should stay that way:
+  #   * the pipeline does not need it -- the model ships inside the image, and
+  #     a full run has been verified end to end under --network none;
+  #   * it makes "this runs offline" enforced rather than merely asserted;
+  #   * anyone bringing their own BAM gets a hard guarantee that their data
+  #     cannot leave this machine, which is not a promise you should have to
+  #     take on trust with human genomic data.
+  # Set to null only if you have a specific reason to give the container a network.
+  docker_network: "none"
   # Docker resource caps. null => uncapped.
   docker_shm_size: "16g"
   docker_memory: null

@@ -222,7 +222,11 @@ class Config:
                 tier=entry.get("tier", "core"),
                 md5_b64=entry.get("md5_b64"),
                 sidecars=[
-                    Sidecar(url=s["url"], local=s["local"], md5_b64=s.get("md5_b64"))
+                    # url is optional, exactly as it is for the dataset itself:
+                    # a file already on disk (someone's own BAM index) has
+                    # nothing to download.
+                    Sidecar(url=s.get("url", ""), local=s["local"],
+                            md5_b64=s.get("md5_b64"))
                     for s in entry.get("sidecars", []) or []
                 ],
                 derived_from=entry.get("derived_from"),
@@ -231,10 +235,21 @@ class Config:
         return out
 
     def dataset(self, key: str) -> Dataset:
+        """Look up a dataset, distinguishing "absent" from "malformed".
+
+        Both used to surface as "unknown dataset", which sent you looking for a
+        key that was in fact present but missing a required field -- a bad
+        first experience for anyone wiring up their own data.
+        """
+        if key not in (self.raw.get("datasets") or {}):
+            known = ", ".join(sorted(self.raw.get("datasets") or {})) or "none"
+            raise ConfigError(f"unknown dataset '{key}' — defined datasets: {known}")
         try:
             return self.datasets[key]
         except KeyError as exc:
-            raise ConfigError(f"unknown dataset '{key}'") from exc
+            raise ConfigError(
+                f"dataset '{key}' is defined but missing required field {exc}"
+            ) from exc
 
     # -- samples ---------------------------------------------------------
 

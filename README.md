@@ -514,19 +514,75 @@ docker load < deepvariant-image.tar.gz
 ./run_demo.sh --offline
 ```
 
-### Verified, not assumed
+### Enforced, not assumed
 
-The pipeline was run with the container's network switched off entirely:
+**Every pipeline container runs with `--network none`.** It is the default
+(`compute.docker_network` in `config.yaml`), not something you have to remember to
+switch on, and `test_the_pipeline_container_gets_no_network_by_default` fails if it
+is ever dropped from the command line.
 
-```bash
-docker run --rm --network none ... google/deepvariant:1.10.0 run_deepvariant ...
-```
-
-Exit code 0, **313 variants** — the known-good count for that sample — and zero
+That was verified by running the workload end to end with no network interface at
+all: exit code 0, **313 variants** — the known-good count for that sample — and zero
 network, DNS or timeout messages in the log. Nothing in the workload phones home:
 the image is local, the model checkpoint ships inside it, and the reference and BAM
 are on the NVMe. The URLs in `config.yaml` are download sources for `fetch_data.sh`
 and are read only during staging.
+
+Network isolation is part of the run fingerprint, so a race cannot accidentally
+compare an isolated leg against a networked one.
+
+The app itself launches with `analytics_enabled=False` and `share=False`, so Gradio
+opens no tunnel and reports no telemetry.
+
+---
+
+## Bring your own data
+
+Visitors can run *their own* BAM, and it never leaves the machine — the container
+has no network interface, so there is no path off the box. This is worth saying out
+loud when the data is somebody's genome.
+
+Drop the BAM and its index on the data volume, then create `config.local.yaml`
+(gitignored, deep-merged over `config.yaml`):
+
+```yaml
+datasets:
+  visitor_bam:
+    name: "Visitor BAM"
+    local: "byo/visitor.bam"       # relative to paths.data_root
+    sidecars:
+      - local: "byo/visitor.bam.bai"
+
+samples:
+  - id: "visitor"
+    label: "Visitor's own sample"
+    dataset: "visitor_bam"
+    regions: "chr20:10,000,000-10,100,000"   # null for the whole genome
+    blurb: "Brought on a USB stick."
+    runtime_fast_s: 65
+    runtime_slow_s: 90
+    illustrative: true              # you have not measured their data before
+    show_in_booth: true
+```
+
+Then `./run_demo.sh` and pick it from the sample list, or
+`.venv/bin/python -m app.run --sample visitor --cores 0-95`.
+
+Notes that will save you time on the day:
+
+- **No `url` is needed** for either the dataset or its sidecars. Files already on
+  disk have nothing to download.
+- **`samples:` is a list, and lists replace rather than merge.** Declaring a sample
+  in `config.local.yaml` hides the built-in ones. That is usually what you want at a
+  booth; re-declare `chr20` alongside if you want both.
+- **Mark it `illustrative: true`.** The runtime fields are only estimates for data
+  nobody has run before, and this flag is what makes the UI label them as such
+  instead of presenting them as measurements.
+- The BAM must be **aligned to the same reference** the demo has staged (GRCh38, no
+  ALT) and must have an index next to it.
+
+This path was tested end to end: a BAM with no URL, in a network-isolated container,
+produced its VCF normally.
 
 ### Fonts are bundled, and why that matters
 

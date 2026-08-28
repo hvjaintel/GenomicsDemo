@@ -1505,3 +1505,61 @@ def test_expected_runtime_is_matched_to_the_leg_it_was_measured_on(cfg):
     # nothing on file applies and the honest answer is "no estimate".
     assert _expected_runtime(sample, cfg, None)[0] is None
     assert _expected_runtime(sample, cfg, "0-7")[0] is None
+
+
+# ---------------------------------------------------------------------------
+# Offline operation, and running someone else's data.
+# ---------------------------------------------------------------------------
+
+
+def test_the_pipeline_container_gets_no_network_by_default(cfg, spec, tmp_path):
+    """Verified: a full run completes under --network none.
+
+    This is enforced rather than assumed because the demo is used on closed
+    show networks, and because a visitor's genomic data must not be able to
+    leave the box.
+    """
+    runner = DeepVariantRunner(cfg)
+    cmd = runner.build_command(spec, True, tmp_path, verbose_isa=False)
+    assert "--network" in cmd
+    assert cmd[cmd.index("--network") + 1] == "none"
+
+
+def test_network_isolation_is_part_of_the_fingerprint(spec):
+    """A networked leg and an isolated leg are not the same experiment."""
+    networked = dataclasses.replace(spec, network=None)
+    assert networked.fingerprint() != spec.fingerprint()
+    assert speedup(
+        _result(True, 100, networked.fingerprint()),
+        _result(False, 250, spec.fingerprint()),
+    ) is None
+
+
+def test_a_dataset_may_be_local_only_with_no_url(cfg):
+    """Someone's own BAM has nothing to download -- neither has its index.
+
+    The sidecar parser used to require `url`, so a local-only index raised
+    KeyError and surfaced as "unknown dataset", which pointed at the wrong
+    problem entirely.
+    """
+    raw = copy.deepcopy(cfg.raw)
+    raw["datasets"]["byo"] = {
+        "name": "Someone's own BAM",
+        "local": "byo/their.bam",
+        "sidecars": [{"local": "byo/their.bam.bai"}],
+    }
+    ds = Config(raw, Path("test")).dataset("byo")
+    assert ds.url == ""
+    assert ds.sidecars[0].url == ""
+    assert ds.sidecars[0].local == "byo/their.bam.bai"
+
+
+def test_a_missing_dataset_and_a_malformed_one_report_differently(cfg):
+    raw = copy.deepcopy(cfg.raw)
+    raw["datasets"]["broken"] = {"name": "no local key"}
+    config = Config(raw, Path("test"))
+
+    with pytest.raises(ConfigError, match="unknown dataset"):
+        config.dataset("not_defined_at_all")
+    with pytest.raises(ConfigError, match="missing required field"):
+        config.dataset("broken")

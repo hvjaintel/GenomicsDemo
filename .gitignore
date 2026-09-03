@@ -1,5 +1,8 @@
 # Staged genomics data — never commit (tens of GB)
-data/
+# `data/*` rather than `data/`: excluding the directory itself stops git ever
+# descending into it, which silently makes the negation below a no-op and drops
+# .gitkeep from the repo. Matching the contents keeps the negation working.
+data/*
 !data/.gitkeep
 
 # Run outputs

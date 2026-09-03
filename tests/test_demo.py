@@ -10,6 +10,7 @@ import copy
 import dataclasses
 import gzip
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -1621,3 +1622,22 @@ def test_presenter_guide_does_not_claim_amx_is_used():
     guide = PRESENTER_GUIDE.read_text()
     assert "no fp32 path through AMX" in guide
     assert "0.98" in guide
+
+
+def test_docs_only_cite_tests_that_exist():
+    """The docs name specific tests as evidence for their claims.
+
+    Citing a test is a strong claim -- "don't take my word for it, run this".
+    A renamed or deleted test turns that into a dead reference that reads as
+    authoritative, and the first person to notice is someone trying to verify
+    a number. Caught this the hard way: the replication section originally
+    cited `test_scaling_cpusets_contain_no_smt_siblings`, which never existed.
+    """
+    root = Path(__file__).resolve().parents[1]
+    source = Path(__file__).read_text()
+    defined = set(re.findall(r"^def (test_\w+)", source, re.MULTILINE))
+
+    for doc in (root / "README.md", root / "docs" / "PRESENTER-GUIDE.md"):
+        cited = set(re.findall(r"\b(test_\w+)", doc.read_text()))
+        missing = cited - defined
+        assert not missing, f"{doc.name} cites tests that do not exist: {sorted(missing)}"

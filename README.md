@@ -609,6 +609,74 @@ external stylesheet or script ever reappears.
 
 ---
 
+## Replicating this demo on another machine
+
+**What to copy: the git repo, and nothing else.** It is ~2.9 MB, of which 2.4 MB is the
+replay trace. Everything large is deliberately reproducible rather than shipped —
+`git clone` is the whole transfer.
+
+Not in git, on purpose:
+
+| | Size here | How the target box gets it |
+|---|---|---|
+| Staged genomics data | **48 GB** | `./scripts/fetch_data.sh` — public downloads, checksum-verified |
+| `google/deepvariant:1.10.0` | 7.2 GB | `docker pull` |
+| `.venv/` | 586 MB | `./run_demo.sh` builds it |
+| `<data_root>/runs/` | 128 GB+ | Output only; nothing to carry |
+
+Re-downloading from the original sources is also *more* trustworthy than copying a copy,
+because `fetch_data.sh` verifies checksums and the derived files (uncompressed reference,
+`.fai`, sliced smoke BAM) are rebuilt rather than inherited.
+
+### Bring-up
+
+```bash
+git clone <repo> && cd GenomicsDemo
+docker pull google/deepvariant:1.10.0
+./scripts/fetch_data.sh                 # ~2 GB core set; add --wgs for the 43 GB genome
+./scripts/preflight.sh --pull --smoke   # real 60s run, not just a version check
+./run_demo.sh
+```
+
+### Then re-check `config.yaml` — it is tuned to *this* bench
+
+This is the step that gets skipped, and it is the one that matters. Several values in
+`config.yaml` are measurements or topology facts about the machine documented under
+"The bench server". Copied to different hardware they do not become approximate; they
+become **false**, while still being displayed with the confidence of a measurement.
+
+| Key | Why it does not travel |
+|---|---|
+| `scaling.baseline_cpuset` / `full_cpuset` | `0-15` and `0-95` are SMT-free **on this box only**. Re-derive with `lscpu -p=CPU,CORE`. See the warning below. |
+| `samples[].runtime_fast_s` / `runtime_slow_s` | Measured wall clocks. Set `illustrative: true` until re-measured, or the UI presents another machine's timings as this one's. |
+| `paths.data_root` | `/mnt/nvme2n1/genomics` almost certainly does not exist there. |
+| `compute.numa_policy` | Chosen for 4 NUMA nodes (SNC2). Verify with `lscpu`. |
+| `compute.num_shards` | `null` auto-detects, which is usually right — but a fixed value copied from here is not. |
+| `tco.assumptions` | 400 W idle / 1100 W load / $0.16 per kWh are this chassis and this tariff. |
+
+> **The failure that is silent.** On this box CPUs `0-95` are one thread per physical core
+> and `96-191` are their siblings, so `0-95` is a clean 96-core cpuset. **That numbering is
+> not universal.** On a machine that enumerates siblings adjacently, `0-95` is 48 cores
+> plus 48 hyperthreads — and the race quietly reverts to the confounded core-count-plus-SMT
+> comparison this demo was specifically rebuilt to avoid. Nothing errors. The number just
+> stops meaning what the screen says it means. Always re-derive the cpusets from
+> `lscpu -p=CPU,CORE` on the target.
+>
+> Two tests catch this, and both read the topology of whatever host they run on:
+> `test_neither_leg_is_given_an_smt_sibling` fails if either cpuset contains both threads
+> of one core, and `test_the_fast_leg_uses_every_physical_core` fails if the fast leg no
+> longer covers every physical core on the box. **Run the suite on the target machine** —
+> they are the cheapest possible check that the race still means what it claims. Both skip
+> if `lscpu` is absent, so confirm they ran rather than assuming green.
+
+Finally, `README.md` and `docs/PRESENTER-GUIDE.md` quote measured figures — 2.66×,
+339.4 s, 25m 47s, 7,709,239 variants — always alongside "2× Xeon 6740P, 96C/192T, 1 TB".
+On different silicon those need re-measuring before anyone reads them to a customer. The
+presenter guide has drift tests, but they can only check the docs agree with each other;
+they cannot know which machine you are standing next to.
+
+---
+
 ## Tests
 
 ```bash

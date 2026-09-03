@@ -347,6 +347,12 @@ about the disk holding the images.
 
 ## Booth-day runbook
 
+> **Presenting without a genomics background?** See
+> [`docs/PRESENTER-GUIDE.md`](docs/PRESENTER-GUIDE.md) — plain-language explanation of the
+> workload, the floor script, a question bank with answers (including the AMX question,
+> which a well-informed visitor *will* ask), and the wording for handing a question off
+> rather than guessing at it.
+
 ### The morning before doors open
 
 ```bash

@@ -1563,3 +1563,61 @@ def test_a_missing_dataset_and_a_malformed_one_report_differently(cfg):
         config.dataset("not_defined_at_all")
     with pytest.raises(ConfigError, match="missing required field"):
         config.dataset("broken")
+
+
+# ---------------------------------------------------------------------------
+# Presenter guide
+#
+# This is the one document that gets read aloud to a customer, by someone who
+# cannot spot a stale figure because they don't know the workload. A wrong
+# number here is quoted with confidence to a prospect, which is the most
+# expensive place in the repo for drift to hide.
+# ---------------------------------------------------------------------------
+
+PRESENTER_GUIDE = Path(__file__).resolve().parents[1] / "docs" / "PRESENTER-GUIDE.md"
+
+
+def test_presenter_guide_exists():
+    assert PRESENTER_GUIDE.is_file(), "docs/PRESENTER-GUIDE.md is referenced by README"
+
+
+def test_presenter_guide_quotes_the_configured_cpusets(cfg):
+    """The guide answers "is hyperthreading included?" with specific cpusets.
+
+    If the race is ever re-pinned, that answer becomes false while still
+    sounding authoritative.
+    """
+    text = PRESENTER_GUIDE.read_text()
+    scaling = cfg.raw["scaling"]
+    assert scaling["baseline_label"] in text
+    assert scaling["full_label"] in text
+
+
+def test_presenter_guide_headline_numbers_match_the_readme():
+    """Both docs quote the same measured results, so they must not diverge."""
+    guide = PRESENTER_GUIDE.read_text()
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    for claim in ["2.66", "339.4", "127.4", "210,390", "7,709,239", "3.79", "25m 47s"]:
+        assert claim in guide, f"presenter guide lost {claim}"
+        assert claim in readme, f"README lost {claim}"
+
+
+def test_presenter_guide_marks_the_efficiency_panel_illustrative(cfg):
+    """The TCO panel is modelled, not measured.
+
+    The guide instructs the presenter to say so out loud; that instruction has
+    to survive, because it is the only safeguard once the words leave the room.
+    """
+    assert cfg.raw["tco"]["illustrative"] is True
+    assert "illustrative" in PRESENTER_GUIDE.read_text().lower()
+
+
+def test_presenter_guide_does_not_claim_amx_is_used():
+    """AMX is the question a well-informed visitor asks.
+
+    The measured answer is that AMX does no work on this fp32 model. The guide
+    must keep saying so rather than drifting toward the more flattering claim.
+    """
+    guide = PRESENTER_GUIDE.read_text()
+    assert "no fp32 path through AMX" in guide
+    assert "0.98" in guide

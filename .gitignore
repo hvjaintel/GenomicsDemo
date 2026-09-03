@@ -1,0 +1,44 @@
+# Staged genomics data — never commit (tens of GB)
+# `data/*` rather than `data/`: excluding the directory itself stops git ever
+# descending into it, which silently makes the negation below a no-op and drops
+# .gitkeep from the repo. Matching the contents keeps the negation working.
+data/*
+!data/.gitkeep
+
+# Run outputs
+runs/
+output/
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.g.vcf.gz
+*.bam
+*.bam.bai
+*.cram
+*.fasta
+*.fasta.gz
+*.fa
+*.fai
+*.gzi
+
+# Recorded demo traces are committed selectively; ignore scratch ones
+traces/scratch/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local overrides
+config.local.yaml
+.env
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

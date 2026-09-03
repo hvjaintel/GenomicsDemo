@@ -1,0 +1,249 @@
+"""Run ONE workload, headless, and report what actually happened.
+
+`app.race` runs two legs to compare them. That is the wrong tool when you just
+want the workload itself -- on the full genome a race means running 46 GB of
+reads twice, which is hours of machine time to answer a question you did not
+ask. This module runs a single leg.
+
+Use it for the headline whole-genome run, for filling in a measured runtime in
+config.yaml, or any time you want a number rather than a ratio.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+from .config import Config
+from .parsing import STAGES
+from .runner import DeepVariantRunner, RunResult, time_ratio
+
+# How often to reassure the operator the run is alive when no percentage is
+# available. Long enough not to scroll a booth terminal, short enough that
+# nobody reaches for Ctrl-C.
+PROGRESS_EVERY_S = 15.0
+
+
+def _expected_runtime(sample, cfg, cores: str | None) -> tuple[float | None, str]:
+    """Pick the recorded runtime that matches how this run is actually pinned.
+
+    Returns (seconds, qualifier). Seconds is None when nothing on file applies,
+    which is the honest answer for an arbitrary cpuset -- better than quoting a
+    figure recorded under different conditions.
+    """
+    illustrative = getattr(sample, "illustrative", False)
+    label = "estimate" if illustrative else "measured previously"
+    scaling = (cfg.raw.get("scaling") or {})
+
+    # The recorded runtimes are per-leg: runtime_fast_s was measured on
+    # scaling.full_cpuset and runtime_slow_s on scaling.baseline_cpuset. An
+    # unpinned run uses every SMT sibling too, which is neither leg, so there is
+    # nothing on file for it -- say so rather than quote the 96-core figure.
+    if not cores:
+        return None, ""
+
+    if cores == scaling.get("full_cpuset") and sample.runtime_fast_s:
+        return sample.runtime_fast_s, f"{label}, {cores}"
+    if cores == scaling.get("baseline_cpuset") and sample.runtime_slow_s:
+        return sample.runtime_slow_s, f"{label}, {cores}"
+    return None, ""
+
+
+def _active_stage(stages: dict[str, dict]) -> str | None:
+    """Label of the stage currently running, or None if that is not yet known.
+
+    Stages start in order, so the running one is the last that has begun and
+    not finished. Iterate STAGES rather than the dict so this does not quietly
+    depend on the payload's key order. Returning None rather than a guess keeps
+    the caller honest when the log has not revealed a stage yet.
+    """
+    active = None
+    for name in STAGES:
+        payload = stages.get(name) or {}
+        if payload.get("started") and not payload.get("finished"):
+            active = payload.get("label") or name
+    return active
+
+
+def _fmt_hms(seconds: float | None) -> str:
+    if seconds is None:
+        return "unknown"
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
+def report(result: RunResult, digest: str) -> None:
+    """Print the evidence, not just the verdict."""
+    print("\n" + "=" * 70)
+    print("RESULT")
+    print("=" * 70)
+
+    if not result.succeeded:
+        print(f"FAILED (exit {result.exit_code})")
+        if result.error:
+            print(f"  {result.error}")
+        return
+
+    print(f"Wall clock : {_fmt_hms(result.wall_clock_s)}")
+    if result.stage_durations:
+        width = max(len(name) for name in result.stage_durations)
+        for name, secs in result.stage_durations.items():
+            print(f"  {name.ljust(width)}  {_fmt_hms(secs)}")
+
+    counts = result.variant_counts
+    if counts is not None:
+        print(f"Variants   : {counts.total:,}")
+
+    # Ceiling vs use. The banner says what the CPU allows; the primitive counts
+    # say what the run actually did. Only the second one is evidence.
+    print(f"ISA ceiling: {result.reported_isa or 'not reported'} (permitted)")
+    if result.compute_primitives:
+        pct = 100.0 * result.avx512_primitives / result.compute_primitives
+        print(
+            f"AVX-512 kernels: {result.avx512_primitives:,} of "
+            f"{result.compute_primitives:,} compute primitives ({pct:.1f}%)"
+        )
+    else:
+        print("AVX-512 kernels: not measured (run with --verbose-isa to count)")
+
+    if result.vcf_path:
+        print(f"VCF        : {result.vcf_path}")
+    print(f"Fingerprint: {digest}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m app.run",
+        description="Run one DeepVariant workload and report measured results.",
+    )
+    parser.add_argument("--sample", default="chr20", help="sample id from config.yaml")
+    parser.add_argument(
+        "--cores",
+        help="cpuset to pin to, e.g. '0-15'. Default: every core on the box.",
+    )
+    parser.add_argument(
+        "--verbose-isa",
+        action="store_true",
+        help=(
+            "count which kernels oneDNN dispatches. Costs wall clock and a very "
+            "large log, so do NOT combine with a timing you intend to quote."
+        ),
+    )
+    parser.add_argument("--quiet", action="store_true", help="progress only, not every log line")
+    parser.add_argument("--json", metavar="PATH", help="also write the result as JSON")
+    args = parser.parse_args(argv)
+
+    cfg = Config.load()
+
+    # An unmounted data volume looks identical to missing data, except that the
+    # fix is completely different. Say which one it is before the runner raises
+    # a "BAM not staged" error that sends someone off to re-download 46 GB.
+    if cfg.data_disk_looks_unmounted:
+        mountpoint = Path(cfg.raw["paths"]["data_root"]).parent
+        print(
+            f"The data volume looks UNMOUNTED, not missing.\n"
+            f"  {mountpoint} exists but is empty.\n"
+            f"Mount it and re-run:  sudo mount {mountpoint}",
+            file=sys.stderr,
+        )
+        return 2
+
+    runner = DeepVariantRunner(cfg)
+    spec = runner.build_spec(args.sample)
+    if args.cores:
+        spec = dataclasses.replace(spec, cpuset=args.cores)
+
+    sample = cfg.sample(args.sample)
+    print(f"Sample     : {args.sample}  ({sample.label})")
+    print(f"BAM        : {spec.bam}")
+    print(f"Reference  : {spec.reference}")
+    print(f"Regions    : {spec.regions or 'whole genome'}")
+    print(f"Shards     : {spec.num_shards}")
+    cores = spec.core_count or os.cpu_count()
+    print(f"Cores      : {spec.cpuset or 'all'} ({cores} logical)")
+    print(f"Image      : {spec.engine_image}")
+    print(f"ISA ceiling: {cfg.isa_for(True)}")
+    print(f"Fingerprint: {spec.fingerprint_digest()}")
+
+    if args.verbose_isa:
+        print(
+            "\nNOTE: verbose ISA logging is ON. It proves which kernels ran, but it\n"
+            "      also slows the run and inflates the log. Do not quote this timing."
+        )
+
+    # A whole-genome run is hours long. Say so before it starts, using the
+    # estimate in config.yaml, and be explicit that it is only an estimate.
+    #
+    # runtime_fast_s describes an all-core run. Quoting it while pinned to a
+    # subset would promise 25 minutes for a job that takes hours, so only use
+    # it when the run really is unpinned, and reach for the baseline figure
+    # when the cpuset is the one that number was recorded on.
+    est, qualifier = _expected_runtime(sample, cfg, args.cores)
+    if est:
+        print(f"\nExpected   : ~{_fmt_hms(est)} ({qualifier})")
+    elif args.cores:
+        print(
+            f"\nExpected   : unknown — no recorded time for cpuset '{args.cores}'"
+        )
+
+    print("\n" + "=" * 70)
+    started = time.time()
+    result: RunResult | None = None
+    last_pct = -1.0
+    last_print = 0.0
+    for event in runner.run(
+        spec,
+        amx_on=True,
+        run_id=f"run-{args.sample}",
+        verbose_isa=args.verbose_isa,
+        leg_id="single",
+    ):
+        if event.kind == "log" and not args.quiet:
+            print(event.line, flush=True)
+        elif event.kind == "heartbeat":
+            now = time.time()
+            pct = event.overall_percent
+            advanced = pct - last_pct >= 1.0
+            # make_examples emits no percentage at all, and it is the longest
+            # stage of a whole-genome run. Reporting a frozen "0.0%" for a
+            # quarter of an hour reads as a hung job, so fall back to naming
+            # the running stage -- which is a fact we actually have -- rather
+            # than inventing a number we do not.
+            if advanced or now - last_print >= PROGRESS_EVERY_S:
+                last_pct = max(last_pct, pct)
+                last_print = now
+                elapsed = _fmt_hms(now - started)
+                stage = _active_stage(event.stages)
+                head = f"[{pct:5.1f}%]" if pct > 0 else "[ working ]"
+                where = f"  {stage}" if stage else ""
+                print(f"  {head}{where}  {elapsed} elapsed", flush=True)
+        if event.result is not None:
+            result = event.result
+
+    if result is None:
+        print("No result produced.", file=sys.stderr)
+        return 1
+
+    report(result, spec.fingerprint_digest())
+
+    if args.json:
+        payload = dataclasses.asdict(result)
+        Path(args.json).write_text(json.dumps(payload, indent=2, default=str))
+        print(f"\nWrote {args.json}")
+
+    return 0 if result.succeeded else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

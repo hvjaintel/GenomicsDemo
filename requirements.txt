@@ -1,0 +1,29 @@
+# Pinned, light dependencies. The booth box must run offline once these are installed.
+#
+# Install with ./run_demo.sh, which creates an isolated .venv automatically.
+# Manual install:
+#   python3 -m virtualenv .venv && .venv/bin/pip install -r requirements.txt
+#
+# For an offline show floor, pre-download wheels while you still have network:
+#   .venv/bin/pip download -r requirements.txt -d wheelhouse
+#   .venv/bin/pip install --no-index --find-links wheelhouse -r requirements.txt
+
+gradio==4.44.1
+
+# Gradio 4.44 calls starlette's older TemplateResponse signature, which was
+# removed in starlette >= 0.39. These pins keep the web stack on the last
+# combination Gradio 4.44 actually works with — do not float them.
+fastapi==0.112.4
+starlette==0.38.6
+uvicorn==0.30.6
+httpx==0.27.2
+# huggingface_hub 1.x removed HfFolder, which gradio 4.44's oauth module imports.
+huggingface_hub==0.25.2
+
+plotly==5.24.1
+pandas==2.2.3
+# pandas' DataFrame styling (used by Gradio's Dataframe component) needs >= 3.1.2
+jinja2==3.1.4
+PyYAML==6.0.2
+pydantic==2.9.2
+psutil==6.1.0

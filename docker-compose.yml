@@ -1,0 +1,35 @@
+# Alternative launcher for the booth UI.
+#
+#   docker compose up
+#
+# The container runs the Gradio app, but the DeepVariant pipeline itself still
+# runs as a SIBLING container on the host — that is why the Docker socket is
+# mounted. It keeps the NUMA topology and AVX-512 units visible to DeepVariant
+# rather than nesting containers.
+#
+# ./run_demo.sh is the simpler option and is what the booth runbook uses. This
+# file exists for sites that standardise on compose.
+
+services:
+  booth-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: genomics-booth-demo:local
+    container_name: genomics-booth-demo
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      # Sibling-container control. The pipeline runs on the host, not nested.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Paths must be IDENTICAL inside and outside, because the paths this app
+      # passes to `docker run` are resolved by the host daemon.
+      - ${GENOMICS_DATA_ROOT:-/data/genomics}:${GENOMICS_DATA_ROOT:-/data/genomics}
+      - ./config.yaml:/app/config.yaml:ro
+      - ./traces:/app/traces
+    environment:
+      GENOMICS_DEMO_CONFIG: /app/config.yaml
+    # Needs the host docker group to reach the socket. Find it with:
+    #   getent group docker | cut -d: -f3
+    group_add:
+      - ${DOCKER_GID:-999}

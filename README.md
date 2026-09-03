@@ -1,2 +1,698 @@
-# GenomicsDemo
-Varient calling genomics demo
+# Genomics on Built-In Xeon Acceleration
+
+A booth demo that runs **real germline variant calling (DeepVariant)** on an Intel Xeon
+server and proves three things to a live audience:
+
+1. Deep-learning variant calling runs fast on standard Xeon CPUs using the processor's
+   **built-in vector units (AVX-512)** — no add-in cards, no GPU.
+2. **It scales across Xeon cores**: HG002 chr20 takes **339 s on 16 cores** and **127 s on
+   96 cores** — a measured **2.66×**, with both legs calling exactly the same 210,390
+   variants. This is a *core-to-core* comparison: both legs get whole physical cores and
+   neither gets a hyperthread sibling, so the number is core scaling and nothing else.
+   Same arithmetic, more cores, no trade-off.
+3. It does so on a **quiet, air-cooled, bench-deployable** server — deploy where the science
+   happens, not in a loud data hall.
+
+> **One instruction set, pinned.** Every run in this demo asks oneDNN for the same
+> ceiling — `ONEDNN_MAX_CPU_ISA=AVX512_CORE` — on both legs of every race, and the app
+> reads the instruction set back out of oneDNN's own output to prove it. Nothing on
+> screen offers a choice, because varying the instruction set inside a core-scaling race
+> would attribute an arithmetic difference to the core budget.
+
+---
+
+## The honesty rule
+
+This demo shows real numbers or it shows nothing.
+
+- Timings come from real `docker run` wall clocks. Variant counts are parsed from the VCF
+  the pipeline actually produced.
+- The app asks oneDNN to report the instruction set it **actually** selected, parses it back
+  out of the logs, and displays it. If the reported ISA contradicts the requested ceiling,
+  the run is marked **failed** rather than reporting a number we can't stand behind.
+- A speedup is only ever shown when both legs succeeded **and** every parameter other than
+  the single thing under test — the core budget — was identical
+  (enforced by a run fingerprint comparison).
+- The app reports what oneDNN was **permitted** to use and what it **actually** used as two
+  separate facts. Counting kernel dispatches is the only way to tell the difference between
+  "AVX-512 was available" and "AVX-512 did the work"; conflating them is exactly how this
+  project nearly shipped a 1.00× speedup as a headline.
+- Anything estimated — expected runtimes, TCO figures — is rendered in a visually distinct
+  "Illustrative" style and labelled as an assumption.
+- Replay mode shows a permanent, unmistakable banner. Replays are recordings of real runs,
+  never synthesised.
+- The DNA helix on the Run console is an **activity** indicator, not a progress bar. It turns
+  only while the container is producing output and freezes when output stops, so a wedged run
+  looks wedged. Progress is the stage bars, which are parsed from DeepVariant's own output.
+
+---
+
+## How the scaling race works (staff talking point)
+
+> We run the same genome, the same container, the same binary and the same 192 shards
+> twice. The only thing we change is how many of this server's cores the job is allowed to
+> touch — 16 cores, then 96 cores. Both legs get whole physical cores; neither gets a
+> hyperthread, so what you are watching is core scaling and not SMT. Nothing else moves:
+> same data, same instruction set, same everything. Both runs call exactly the same
+> 210,390 variants, so this isn't a
+> quality trade — it's the same work, finished sooner. That's the point of a server like
+> this: **the throughput is already in the box, and it scales.**
+
+### If a visitor asks which accelerator is doing the work (staff talking point)
+
+> AVX-512 — the wide vector units built into every core of this Xeon. We don't just claim
+> that: the app asks oneDNN to name the instruction set it selected, counts how many of the
+> compute kernels actually ran on AVX-512, and puts both numbers on screen. The public
+> DeepVariant model is fp32, and AVX-512 is what oneDNN runs fp32 convolutions on. No
+> add-in card, no separate accelerator, no code changes — the throughput is already in the
+> box, and the race shows it scaling across cores.
+
+Everything else is held constant by construction: both legs of a race are built from a single
+`RunSpec`, and the app compares a fingerprint of every shared parameter before it will report
+a speedup.
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/hvjaintel/GenomicsDemo.git
+cd GenomicsDemo
+
+./scripts/fetch_data.sh          # ~2 GB: reference + smoke + chr20
+docker pull google/deepvariant:1.10.0
+./scripts/preflight.sh --smoke   # verify the stack end to end
+./run_demo.sh                    # launch the booth UI on :7860
+```
+
+Open `http://localhost:7860` full screen on the booth monitor.
+
+---
+
+## The bench server
+
+Everything measured in this repo was run on this machine. Quote numbers from here
+only alongside this configuration — a wall-clock time without its hardware is not a
+claim anyone can check.
+
+| | |
+|---|---|
+| CPU | 2x Intel Xeon 6740P — 48 cores/socket, **96 cores / 192 threads** total |
+| Memory | 1 TB |
+| OS disk | 1x M.2 NVMe 960 GB |
+| Data disks | 2x U.2 NVMe 4 TB |
+
+Datasets live on a U.2 data disk (`/mnt/nvme2n1`), never the OS disk — the WGS BAM
+alone is 46 GB. See "Persisting the data mount" below.
+
+### Measured whole-genome run
+
+HG002, 35x, GRCh38, DeepVariant 1.10.0, all 192 threads, 192 shards. (This is the
+whole-machine run including SMT; the core-to-core race figures are below.)
+
+| Stage | Time |
+|---|---|
+| `make_examples` | 13m 50s |
+| `call_variants` | 11m 05s |
+| `postprocess_variants` | 49s |
+| **Total** | **25m 47s** |
+
+7,709,239 variants called. For scale, Google's own published figure for the same
+version is 69 minutes on a 96-vCPU cloud instance.
+
+Re-run after the scratch-space fix: **25m 46s**. Two runs one second apart.
+
+### Measured core scaling
+
+**chr20, core to core** — the race the demo actually runs. Both legs pinned to whole
+physical cores, no SMT siblings on either side:
+
+| Leg | cpuset | Wall clock |
+|---|---|---|
+| 96 cores | `0-95` | **127.4 s** |
+| 16 cores | `0-15` | **339.4 s** |
+| **Ratio** | | **2.66×** |
+
+Both legs called the identical 210,390 variants.
+
+An earlier version of this race put 16 cores against all 192 *threads* and reported
+2.78–2.86×. That confounded two variables — core count and SMT — so a reader could
+credit cores for a win that was partly hyperthreading. The honest core-to-core figure
+is **lower**, and it is the one we quote.
+
+**Whole genome, core to core** — all three legs measured on this box:
+
+| Stage | 96 cores (`0-95`) | 16 cores (`0-15`) |
+|---|---|---|
+| `make_examples` | 17m 37s | 1h 26m 40s |
+| `call_variants` | 14m 20s | 33m 58s |
+| `postprocess_variants` | 59s | 4m 10s |
+| **Total** | **32m 59s** | **2h 04m 51s** |
+
+**3.79x**, measured end to end — not extrapolated. Both runs are in the repo's
+result-JSON format and each records its own `docker run` line, so the pinning that
+produced a number is recoverable from the number's own file.
+
+The result that matters more than the ratio: the two runs produced **byte-identical
+output** — 7,709,239 variants, 6,443,505 SNPs, 1,265,734 indels, 4,842,559 passing,
+down to identical QUAL values on the first variant of chr1. Core count changed the
+wall clock and nothing else.
+
+Scaling is sublinear (3.79x from 6x the cores) because `make_examples` is I/O- and
+Python-bound. The demo says so rather than rounding it up to "6x".
+
+**What hyperthreading is worth, stated separately.** The same genome on all 192
+*threads* takes **25m 47s**, so SMT adds 1.28x on top of 96 cores. That is a real
+result and we publish it — it is simply not core scaling, so it is not what the race
+claims. SMT helps the whole genome (1.28x) far more than chr20 (1.07x), because a
+full genome has enough independent work to keep the sibling threads fed.
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| Intel Xeon with AVX-512 | Needs `avx512f` in `lscpu`. Skylake-SP or newer. |
+| Docker Engine | The user running the demo must be in the `docker` group. |
+| Python 3.10+ | `run_demo.sh` builds its own isolated virtualenv. |
+| Free disk | ~10 GB for the core tier; ~56 GB more for the full WGS BAM. |
+| `numactl` | Optional but recommended: `sudo apt-get install -y numactl` |
+
+### Docker group access
+
+If pre-flight reports **"cannot reach the daemon socket"**, this is a one-time fix:
+
+```bash
+sudo usermod -aG docker $USER
+newgrp docker          # or log out and back in
+```
+
+### Staging the U.2 NVMe
+
+`config.yaml` expects the data drive at `paths.data_root`, which is
+`/mnt/nvme2n1/genomics`. To claim a spare U.2 device (destructive — check the device
+name against `lsblk` first, and be certain it is not the OS disk):
+
+```bash
+sudo mkfs.ext4 -L genomics /dev/nvme2n1
+sudo mkdir -p /mnt/nvme2n1
+sudo mount /dev/nvme2n1 /mnt/nvme2n1
+sudo mkdir -p /mnt/nvme2n1/genomics && sudo chown "$USER:$USER" /mnt/nvme2n1/genomics
+```
+
+### Persisting the data mount
+
+**Do this, or a reboot will appear to delete all your data.** A mount created with
+`mount` alone does not survive a restart. When it vanishes, the configured data root
+stops existing, the app falls back to `./data` on the OS drive, and every dataset
+reports as missing — which looks exactly like data loss but is not. The files are
+still on the unmounted disk.
+
+Add it to `/etc/fstab` so it comes back automatically:
+
+```bash
+# Substitutes the UUID itself -- do not retype it, and do not paste a
+# placeholder. A literal "<uuid>" in fstab is accepted silently by `mount -a`
+# when `nofail` is set, so the mount just never happens and the next reboot
+# looks like data loss again.
+echo "UUID=$(sudo blkid -s UUID -o value /dev/nvme2n1) /mnt/nvme2n1 ext4 defaults,noatime,nofail 0 2" \
+  | sudo tee -a /etc/fstab
+
+sudo systemctl daemon-reload
+findmnt --verify                            # must report no [E] lines
+sudo mount -a                               # verify it mounts cleanly NOW
+findmnt /mnt/nvme2n1                        # should print the device
+```
+
+`findmnt --verify` is the check that matters. If it prints
+`[E] unreachable on boot required source: UUID=<uuid>`, the placeholder was
+pasted literally; fix that line before rebooting:
+
+```bash
+sudo sed -i "s|^UUID=<uuid> /mnt/nvme2n1 .*$|UUID=$(sudo blkid -s UUID -o value /dev/nvme2n1) /mnt/nvme2n1 ext4 defaults,noatime,nofail 0 2|" /etc/fstab
+```
+
+`nofail` matters: without it, a missing data disk drops the machine to an emergency
+shell at boot rather than starting normally.
+
+### Giving the OS disk its real capacity
+
+Separate problem from the data mount, and the one that actually killed a run: the
+data disk can report terabytes free while `/` is nearly full. Docker images, container
+writable layers and DeepVariant's scratch all land on `/`, so pre-flight checks
+`/var/lib/docker` independently of the data root.
+
+On this bench the root logical volume was **100 GiB carved out of a 3,573 GiB volume
+group** — about 3.4 TB sat unallocated while `/` ran at 86%. Extending is online and
+needs no reboot:
+
+```bash
+sudo vgs                                    # read VFree for yourself first
+sudo lvextend -r -l +100%FREE /dev/ubuntu-vg-1/ubuntu-lv
+df -h /                                     # confirm the new size
+```
+
+`-r` grows the ext4 filesystem in the same step, so there is no window where the
+volume is larger than the filesystem on it.
+
+**Check the volume group name against your own `vgs` output rather than trusting the
+line above.** This machine has two groups one character apart — `ubuntu-vg-1` backs
+the running system, `ubuntu-vg` belongs to a dormant install on the other NVMe. The
+pre-flight remedy text derives the right name from the live mount for this reason.
+To leave room for LVM snapshots, use `-L +500G` instead of `-l +100%FREE`.
+
+Restart the app afterwards: it resolves paths once at startup.
+
+If a reboot has already dropped the mount, nothing is lost — just remount:
+
+```bash
+sudo mount /mnt/nvme2n1
+```
+
+`fetch_data.sh` and `python -m app.run` both detect this state (an empty mountpoint)
+and refuse to run rather than re-downloading tens of GB onto the OS disk. Override
+with `--allow-fallback-root` only if you genuinely intend to stage data on `/`.
+
+---
+
+## Data staging
+
+`scripts/fetch_data.sh` downloads from NIST GIAB and the public DeepVariant GCS bucket,
+verifies everything, and lays files out to match `config.yaml`.
+
+```bash
+./scripts/fetch_data.sh                # core tier: reference + smoke + chr20 (~2 GB)
+./scripts/fetch_data.sh --with-truth   # + GIAB HG002 v4.2.1 truth set (~170 MB)
+./scripts/fetch_data.sh --with-wgs     # + full 35x WGS BAM (~46 GB)
+./scripts/fetch_data.sh --all          # everything except FASTQ
+./scripts/fetch_data.sh --verify-only  # re-verify staged files, download nothing
+```
+
+**Integrity.** GCS publishes an authoritative MD5 in the `x-goog-hash` response header; the
+script captures it at download time and verifies against it. NCBI sibling checksum files are
+used where published. A local sha256 is computed for every file and written to
+`data/CHECKSUMS.sha256`. Once a sha256 is recorded in `config.yaml` it is **authoritative** —
+a mismatch is a hard failure, and the script will never silently regenerate it.
+
+The script prints the computed hashes on first download so you can paste them into
+`config.yaml`. The core-tier values are already pinned there.
+
+| Dataset | Size | Tier |
+|---|---|---|
+| GRCh38 no-ALT reference | 886 MB gz → 3.1 GB | core |
+| NA12878 chr20 100 kb smoke BAM | 3.9 MB | core |
+| HG002 chr20 35x BAM | 1.09 GB | core |
+| HG002 full WGS 35x BAM | 46.0 GB | `--with-wgs` |
+| HG002 GIAB truth v4.2.1 + BED | 168 MB | `--with-truth` |
+
+> The reference `.fai` index is built by `scripts/build_fai.py`, a dependency-free generator
+> whose output is byte-identical to the index GIAB publishes. No `samtools` needed.
+
+> **Note on GIAB URLs:** older documentation points at
+> `AshkenazimTrio/HG002_NA24385_son/latest/GRCh38/` — that path now 404s, because `latest`
+> was repointed at a release with no `GRCh38` subdirectory. This demo pins the explicit
+> `NISTv4.2.1` release instead, which is both reachable and reproducible.
+
+### Where the scratch space goes
+
+`run_deepvariant` starts one `make_examples` process per shard, and each is a self-extracting
+Bazel binary that unpacks its runfiles tree into `$TMPDIR`. Measured on this box at
+`num_shards: 192`:
+
+| | |
+|---|---|
+| Peak scratch during `make_examples` | **6.5 GB** |
+| Files at peak | ~55,000 |
+| What it is | ~34 MB of Bazel runfiles × 192 shards, plus GNU parallel's per-job output buffers |
+
+That figure is from the **smoke** sample — 100 kb of chr20. It scales with `num_shards`, not
+with genome size, so a whole-genome run needs the same headroom for the same reason.
+
+The container's `/tmp` is therefore bind-mounted to `<data_root>/runs/<run>-tmp` on the U.2,
+and `TMPDIR`, `HOME` and `MPLCONFIGDIR` all point into it. Without that mount it lands on the
+container's writable layer — `/var/lib/docker` on the OS disk — and the run dies with:
+
+```
+parallel: Error: Cannot append to buffer file in /tmp.
+parallel: Error: Is the disk full?
+DeepVariant exited with code 255
+```
+
+The directory is deleted when the run ends. Pre-flight's **OS disk** row watches the
+filesystem behind Docker independently of the data volume, because a healthy U.2 says nothing
+about the disk holding the images.
+
+---
+
+## Booth-day runbook
+
+> **Presenting without a genomics background?** See
+> [`docs/PRESENTER-GUIDE.md`](docs/PRESENTER-GUIDE.md) — plain-language explanation of the
+> workload, the floor script, a question bank with answers (including the AMX question,
+> which a well-informed visitor *will* ask), and the wording for handing a question off
+> rather than guessing at it.
+
+### The morning before doors open
+
+```bash
+./scripts/fetch_data.sh --with-truth   # confirm data is staged and verified
+./scripts/preflight.sh --pull --smoke  # pull the image, run a real 60s smoke test
+```
+
+Every check must be green, or a known-and-accepted amber. Then:
+
+```bash
+./run_demo.sh
+```
+
+Put the browser full screen (F11). Leave the **Status** tab up between visitors.
+
+### The six-click visitor demo
+
+1. **Status** — "96 cores, a terabyte of RAM, and the accelerators are already in the CPU."
+2. **Dataset** — pick *HG002 chr20*. "A real human chromosome at 35x depth."
+3. **Scaling race** — press **RACE: 16 cores vs 96 cores**.
+4. Watch the 16-core leg run first (~6 min), then the full machine overtake it (~2 min).
+5. **Speedup card** lands: "Xeon scales: 96 cores vs 16 cores — ~2.7×", alongside the
+   variant counts proving both legs produced the same answer.
+6. **Results** — same variant counts either way. Speed without an accuracy trade.
+
+### Resetting between visitors
+
+Nothing to reset. Press the button again — each run writes to its own directory under
+`<data_root>/runs/`. To clear the screen, switch to **Status** and back.
+
+### When something goes wrong
+
+| Symptom | Action |
+|---|---|
+| A run fails mid-demo | The error is shown on screen. Press START again — one click. |
+| The helix stops turning mid-run | Expected during long `call_variants` batches; the caption says how long output has been quiet. If it stays frozen for minutes, check `docker ps` — the container may be wedged. |
+| Docker died | `sudo systemctl restart docker`, then re-run. |
+| UI unresponsive | Ctrl-C, then `./run_demo.sh --skip-checks` (~2 s restart). |
+| Hardware unavailable entirely | Set `demo_mode.policy: always` in `config.yaml` to replay a recorded run. The replay banner makes this obvious to the audience. |
+| Disk filling up | `rm -rf <data_root>/runs/*` — run outputs and scratch only, never the staged inputs. |
+| `parallel: Cannot append to buffer file in /tmp. Is the disk full?` | The container's scratch is not landing on the data volume. Check the `docker run` line on screen for a `-v .../runs/<run>-tmp:/tmp` mount, and check pre-flight's **OS disk** row. See "Where the scratch space goes" below. |
+
+### End of day
+
+`Ctrl-C` in the terminal running `run_demo.sh`.
+
+---
+
+## Demo mode (replay)
+
+If the hardware is offline the booth should still show something, clearly marked as a replay.
+
+- `demo_mode.policy: auto` — replay only when a live run is impossible (the default)
+- `demo_mode.policy: always` — force replay, for a dry rehearsal
+- `demo_mode.policy: never` — always attempt a real run and surface any failure
+
+Traces live in `traces/`. **A trace is a recording of a real run** — record one after a
+successful live race. The repo deliberately ships without a fabricated trace; pre-flight
+warns until you record a genuine one.
+
+---
+
+## Configuration
+
+Everything tunable lives in `config.yaml`: image tags, dataset URLs and checksums, shard
+count, NUMA policy, the oneDNN ISA ceiling, sample menu, acoustics, and the TCO assumptions.
+Nothing is hardcoded in the app.
+
+For a machine-specific tweak that shouldn't be committed, create `config.local.yaml` — it is
+deep-merged over `config.yaml` and is gitignored.
+
+Useful knobs:
+
+```yaml
+compute:
+  num_shards: null              # null = one per hardware thread (192 here)
+  numa_policy: interleave_all   # or: none | bind_node
+demo:
+  port: 7860
+demo_mode:
+  policy: auto
+```
+
+---
+
+## Pipeline paths
+
+**BAM-in (default).** Feeds a pre-aligned BAM straight to `run_deepvariant`. Fast enough for
+a live booth run. Uses `google/deepvariant:1.10.0`, which is pullable from Docker Hub and
+runs on TensorFlow/oneDNN — so it honours the pinned AVX-512 ISA ceiling, and reports back
+which kernels it actually dispatched.
+
+**fq2vcf (optional).** The full Open-Omics pipeline: FASTQ → bwa-mem2 → sort → DeepVariant.
+Longer, best for the headline WGS story. The Intel-optimised images have no prebuilt Docker
+Hub tag and must be built from the
+[Open-Omics Acceleration Framework](https://github.com/IntelLabs/Open-Omics-Acceleration-Framework):
+
+```bash
+git clone https://github.com/IntelLabs/Open-Omics-Acceleration-Framework.git
+cd Open-Omics-Acceleration-Framework/pipelines/deepvariant-based-germline-variant-calling-fq2vcf
+docker build -f Dockerfile_fq2bams  -t open-omics/fq2bams:r1.5  .
+docker build -f Dockerfile_bams2vcf -t open-omics/bams2vcf:r1.5 .
+```
+
+Then stage the FASTQs and build the index (slow, ~70 GB — do this days ahead):
+
+```bash
+./scripts/fetch_data.sh --with-fastq
+./scripts/build_index.sh
+python -m app.fq2vcf          # report readiness
+```
+
+These surface the BF16-quantised call-variant module (~2.7× faster call-variant) and the
+parallel multi-process post-process module. Switch the active engine via `engines.*.default`
+in `config.yaml`.
+
+---
+
+## Layout
+
+```
+config.yaml            single source of truth for every tunable
+run_demo.sh            one-command launcher (builds its own venv)
+docker-compose.yml     alternative launcher; DeepVariant still runs on the host
+app/
+  config.py            config.yaml loader + validation
+  sysinfo.py           real CPU / NUMA / RAM / Docker / acoustics probing
+  preflight.py         green-red readiness checks + smoke test
+  runner.py            Docker orchestration, core budget and ISA toggle
+  race.py              headless two-phase race (verify dispatch, then measure)
+  parsing.py           stage progress, ISA verification, VCF counting
+  replay.py            demo mode
+  tco.py               efficiency panel maths (assumptions only)
+  fq2vcf.py            optional FASTQ-in path
+  main.py              Gradio app, six panels
+  theme.py             booth theme, readable at 3 m
+scripts/
+  fetch_data.sh        tiered download + checksum verification
+  preflight.sh         CLI pre-flight wrapper
+  build_fai.py         dependency-free FASTA index builder
+  build_index.sh       bwa-mem2 index (fq2vcf path only)
+tests/                 unit tests for the toggle, parsing and TCO logic
+data/                  staged datasets (gitignored)
+traces/                recorded runs for demo mode
+```
+
+---
+
+## Offline operation
+
+The show floor may have no usable network. Before you travel:
+
+```bash
+./run_demo.sh --setup-only
+.venv/bin/pip download -r requirements.txt -d wheelhouse
+./scripts/fetch_data.sh --all
+docker pull google/deepvariant:1.10.0
+docker save google/deepvariant:1.10.0 | gzip > deepvariant-image.tar.gz
+```
+
+On site, with no network:
+
+```bash
+docker load < deepvariant-image.tar.gz
+./run_demo.sh --offline
+```
+
+### Enforced, not assumed
+
+**Every pipeline container runs with `--network none`.** It is the default
+(`compute.docker_network` in `config.yaml`), not something you have to remember to
+switch on, and `test_the_pipeline_container_gets_no_network_by_default` fails if it
+is ever dropped from the command line.
+
+That was verified by running the workload end to end with no network interface at
+all: exit code 0, **313 variants** — the known-good count for that sample — and zero
+network, DNS or timeout messages in the log. Nothing in the workload phones home:
+the image is local, the model checkpoint ships inside it, and the reference and BAM
+are on the NVMe. The URLs in `config.yaml` are download sources for `fetch_data.sh`
+and are read only during staging.
+
+Network isolation is part of the run fingerprint, so a race cannot accidentally
+compare an isolated leg against a networked one.
+
+The app itself launches with `analytics_enabled=False` and `share=False`, so Gradio
+opens no tunnel and reports no telemetry.
+
+---
+
+## Bring your own data
+
+Visitors can run *their own* BAM, and it never leaves the machine — the container
+has no network interface, so there is no path off the box. This is worth saying out
+loud when the data is somebody's genome.
+
+Drop the BAM and its index on the data volume, then create `config.local.yaml`
+(gitignored, deep-merged over `config.yaml`):
+
+```yaml
+datasets:
+  visitor_bam:
+    name: "Visitor BAM"
+    local: "byo/visitor.bam"       # relative to paths.data_root
+    sidecars:
+      - local: "byo/visitor.bam.bai"
+
+samples:
+  - id: "visitor"
+    label: "Visitor's own sample"
+    dataset: "visitor_bam"
+    regions: "chr20:10,000,000-10,100,000"   # null for the whole genome
+    blurb: "Brought on a USB stick."
+    runtime_fast_s: 65
+    runtime_slow_s: 90
+    illustrative: true              # you have not measured their data before
+    show_in_booth: true
+```
+
+Then `./run_demo.sh` and pick it from the sample list, or
+`.venv/bin/python -m app.run --sample visitor --cores 0-95`.
+
+Notes that will save you time on the day:
+
+- **No `url` is needed** for either the dataset or its sidecars. Files already on
+  disk have nothing to download.
+- **`samples:` is a list, and lists replace rather than merge.** Declaring a sample
+  in `config.local.yaml` hides the built-in ones. That is usually what you want at a
+  booth; re-declare `chr20` alongside if you want both.
+- **Mark it `illustrative: true`.** The runtime fields are only estimates for data
+  nobody has run before, and this flag is what makes the UI label them as such
+  instead of presenting them as measurements.
+- The BAM must be **aligned to the same reference** the demo has staged (GRCh38, no
+  ALT) and must have an index next to it.
+
+This path was tested end to end: a BAM with no URL, in a network-isolated container,
+produced its VCF normally.
+
+### Fonts are bundled, and why that matters
+
+The UI's typefaces (Inter, JetBrains Mono — both OFL, bundled under
+`app/static/fonts/` with their licences) are inlined into the stylesheet as data
+URIs rather than fetched from `fonts.googleapis.com`.
+
+No network is the *easy* case: DNS fails fast and `font-display: swap` paints text
+immediately in the fallback. The dangerous case is venue wi-fi that accepts the TCP
+connection and then stalls, because the Google Fonts `<link>` is **render-blocking**
+— the booth screen can sit blank for seconds. A data URI cannot stall.
+
+What remains in Gradio's own template is two `preconnect` hints and one `async`
+script from cdnjs (an iframe helper, unused outside an iframe). None of the three
+blocks parsing or rendering, and the page is fully functional without them.
+`test_served_page_has_no_render_blocking_external_resources` fails if a synchronous
+external stylesheet or script ever reappears.
+
+---
+
+## Replicating this demo on another machine
+
+**What to copy: the git repo, and nothing else.** It is ~2.9 MB, of which 2.4 MB is the
+replay trace. Everything large is deliberately reproducible rather than shipped —
+`git clone` is the whole transfer.
+
+Not in git, on purpose:
+
+| | Size here | How the target box gets it |
+|---|---|---|
+| Staged genomics data | **48 GB** | `./scripts/fetch_data.sh` — public downloads, checksum-verified |
+| `google/deepvariant:1.10.0` | 7.2 GB | `docker pull` |
+| `.venv/` | 586 MB | `./run_demo.sh` builds it |
+| `<data_root>/runs/` | 128 GB+ | Output only; nothing to carry |
+
+Re-downloading from the original sources is also *more* trustworthy than copying a copy,
+because `fetch_data.sh` verifies checksums and the derived files (uncompressed reference,
+`.fai`, sliced smoke BAM) are rebuilt rather than inherited.
+
+### Bring-up
+
+```bash
+git clone <repo> && cd GenomicsDemo
+docker pull google/deepvariant:1.10.0
+./scripts/fetch_data.sh                 # ~2 GB core set; add --wgs for the 43 GB genome
+./scripts/preflight.sh --pull --smoke   # real 60s run, not just a version check
+./run_demo.sh
+```
+
+### Then re-check `config.yaml` — it is tuned to *this* bench
+
+This is the step that gets skipped, and it is the one that matters. Several values in
+`config.yaml` are measurements or topology facts about the machine documented under
+"The bench server". Copied to different hardware they do not become approximate; they
+become **false**, while still being displayed with the confidence of a measurement.
+
+| Key | Why it does not travel |
+|---|---|
+| `scaling.baseline_cpuset` / `full_cpuset` | `0-15` and `0-95` are SMT-free **on this box only**. Re-derive with `lscpu -p=CPU,CORE`. See the warning below. |
+| `samples[].runtime_fast_s` / `runtime_slow_s` | Measured wall clocks. Set `illustrative: true` until re-measured, or the UI presents another machine's timings as this one's. |
+| `paths.data_root` | `/mnt/nvme2n1/genomics` almost certainly does not exist there. |
+| `compute.numa_policy` | Chosen for 4 NUMA nodes (SNC2). Verify with `lscpu`. |
+| `compute.num_shards` | `null` auto-detects, which is usually right — but a fixed value copied from here is not. |
+| `tco.assumptions` | 400 W idle / 1100 W load / $0.16 per kWh are this chassis and this tariff. |
+
+> **The failure that is silent.** On this box CPUs `0-95` are one thread per physical core
+> and `96-191` are their siblings, so `0-95` is a clean 96-core cpuset. **That numbering is
+> not universal.** On a machine that enumerates siblings adjacently, `0-95` is 48 cores
+> plus 48 hyperthreads — and the race quietly reverts to the confounded core-count-plus-SMT
+> comparison this demo was specifically rebuilt to avoid. Nothing errors. The number just
+> stops meaning what the screen says it means. Always re-derive the cpusets from
+> `lscpu -p=CPU,CORE` on the target.
+>
+> Two tests catch this, and both read the topology of whatever host they run on:
+> `test_neither_leg_is_given_an_smt_sibling` fails if either cpuset contains both threads
+> of one core, and `test_the_fast_leg_uses_every_physical_core` fails if the fast leg no
+> longer covers every physical core on the box. **Run the suite on the target machine** —
+> they are the cheapest possible check that the race still means what it claims. Both skip
+> if `lscpu` is absent, so confirm they ran rather than assuming green.
+
+Finally, `README.md` and `docs/PRESENTER-GUIDE.md` quote measured figures — 2.66×,
+339.4 s, 25m 47s, 7,709,239 variants — always alongside "2× Xeon 6740P, 96C/192T, 1 TB".
+On different silicon those need re-measuring before anyone reads them to a customer. The
+presenter guide has drift tests, but they can only check the docs agree with each other;
+they cannot know which machine you are standing next to.
+
+---
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+```
+
+The suite covers the guarantees that matter: that the scaling race changes nothing but
+`--cpuset-cpus`, that both legs pin the same AVX-512 ceiling,
+that a speedup is refused when a comparison is invalid, that VCF counting is correct, and that
+ISA verification catches a mismatch.
+
+---
+
+## Credits
+
+Pipeline science: [DeepVariant](https://github.com/google/deepvariant) and Intel's
+[Open-Omics](https://github.com/IntelLabs/Open-Omics-Acceleration-Framework) optimisations.
+Data: [NIST GIAB](https://www.nist.gov/programs-projects/genome-bottle) and the public
+DeepVariant test-data bucket.

@@ -228,11 +228,16 @@ def render_dataset(cfg: Config, sample_id: str | None) -> str:
     else:
         status = pill("Staged and verified", "on")
 
-    checksum = (
-        pill("sha256 pinned", "on")
-        if dataset.has_recorded_checksum
-        else pill("sha256 not pinned in config.yaml", "warn")
-    )
+    if dataset.is_derived:
+        # No upstream hash exists to pin -- this file is cut locally from an
+        # already-verified parent. An amber "not pinned" here would be a
+        # warning nobody could ever clear, so state the provenance instead.
+        # Pre-flight makes the same distinction for the same reason.
+        checksum = pill(dataset.provenance, "on")
+    elif dataset.has_recorded_checksum:
+        checksum = pill("sha256 pinned", "on")
+    else:
+        checksum = pill("sha256 not pinned in config.yaml", "warn")
 
     cards = metric_grid(
         [

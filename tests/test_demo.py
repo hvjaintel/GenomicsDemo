@@ -1641,3 +1641,55 @@ def test_docs_only_cite_tests_that_exist():
         cited = set(re.findall(r"\b(test_\w+)", doc.read_text()))
         missing = cited - defined
         assert not missing, f"{doc.name} cites tests that do not exist: {sorted(missing)}"
+
+
+def test_pinned_checksums_are_well_formed(cfg):
+    """A pinned sha256 must be 64 hex characters.
+
+    Pinning turns a cosmetic "not pinned" warning into a hard integrity
+    check, so a truncated or line-wrapped paste does not fail here -- it
+    fails pre-flight on show morning, against a 46 GB file, with a message
+    saying the data is corrupt when the data is fine.
+    """
+    for key, ds in cfg.datasets.items():
+        if not ds.has_recorded_checksum:
+            continue
+        assert re.fullmatch(r"[0-9a-f]{64}", ds.sha256), (
+            f"dataset {key!r} has a malformed sha256: {ds.sha256!r}"
+        )
+
+
+def test_a_derived_dataset_is_not_expected_to_carry_a_checksum(cfg):
+    """The smoke BAM is sliced locally, so there is no upstream hash to pin.
+
+    It must report provenance rather than an unpinned-checksum warning, or
+    pre-flight shows a permanent amber that can never be cleared.
+    """
+    smoke = cfg.dataset("smoke_bam")
+    assert smoke.is_derived
+    assert not smoke.has_recorded_checksum
+    assert "derived locally from" in smoke.provenance
+
+
+def test_the_dataset_card_does_not_warn_about_a_derived_file(cfg):
+    """A derived file has no upstream checksum, so "not pinned" is not a gap.
+
+    Pre-flight already made this distinction; the dataset card did not, which
+    left the smoke sample showing an amber warning that could never be
+    cleared. Only reachable by enabling smoke in the booth picker, which is
+    exactly the kind of latent wrongness that surfaces on show morning.
+    """
+    from app.main import render_dataset
+
+    html = render_dataset(cfg, "smoke")
+    assert "not pinned" not in html
+    assert "derived locally from" in html
+
+
+def test_the_dataset_card_still_warns_when_a_real_download_is_unpinned(cfg):
+    """The derived-file exemption must not swallow the genuine warning."""
+    from app.main import render_dataset
+
+    raw = copy.deepcopy(cfg.raw)
+    raw["datasets"]["chr20_bam"]["sha256"] = ""
+    assert "not pinned" in render_dataset(Config(raw, cfg.source), "chr20")

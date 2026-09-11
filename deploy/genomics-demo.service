@@ -1,0 +1,60 @@
+# =============================================================================
+# genomics-demo.service — bring the booth UI up at boot, with no login.
+# =============================================================================
+# Installed by scripts/install_service.sh, which fills in the bracketed values
+# below. Do not install this file directly: the unsubstituted placeholders are
+# not valid systemd syntax, so a hand-copied unit fails in a way that looks
+# like a systemd problem rather than a missing step.
+#
+# Why a system unit rather than a user unit: a booth machine reboots overnight
+# or loses power, and nobody logs in before doors open. A user unit needs
+# either an active session or `loginctl enable-linger`, which is one more thing
+# to forget on the one morning it matters. This goes from cold boot to a live
+# screen with no human involved.
+# =============================================================================
+
+[Unit]
+Description=Genomics booth demo (DeepVariant on Xeon)
+Documentation=file://__REPO__/README.md
+
+# Docker must be up first, but deliberately NOT Requires=. If the daemon is
+# unhealthy we still want the UI on screen showing red pre-flight checks --
+# a booth monitor reporting a fault beats a black screen nobody can diagnose.
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+# This one IS a hard dependency. The staged genomics data lives on a separate
+# NVMe, and systemd will otherwise happily start the demo before that disk is
+# mounted -- pre-flight then reports every dataset missing on a machine where
+# nothing is actually wrong.
+RequiresMountsFor=__DATA_ROOT__
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__REPO__
+
+# run_demo.sh creates the venv if absent, installs pinned deps only when
+# requirements.txt has changed, runs pre-flight, then exec's the app -- so
+# systemd tracks the Python process directly rather than a wrapper shell.
+ExecStart=__REPO__/run_demo.sh
+
+# First boot after a fresh clone builds a virtualenv and installs wheels.
+TimeoutStartSec=900
+TimeoutStopSec=30
+
+# A wedged UI at a trade show should recover itself. on-failure rather than
+# always, so a deliberate `systemctl stop` stays stopped.
+Restart=on-failure
+RestartSec=10
+
+# pip and docker both expect a real HOME.
+Environment=HOME=/home/__USER__
+Environment=PYTHONUNBUFFERED=1
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=genomics-demo
+
+[Install]
+WantedBy=multi-user.target

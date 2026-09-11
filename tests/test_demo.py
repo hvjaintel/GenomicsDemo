@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import gzip
+import os
 import json
 import re
 import shutil
@@ -1693,3 +1694,80 @@ def test_the_dataset_card_still_warns_when_a_real_download_is_unpinned(cfg):
     raw = copy.deepcopy(cfg.raw)
     raw["datasets"]["chr20_bam"]["sha256"] = ""
     assert "not pinned" in render_dataset(Config(raw, cfg.source), "chr20")
+
+
+# ---------------------------------------------------------------------------
+# systemd service
+# ---------------------------------------------------------------------------
+
+UNIT_TEMPLATE = Path(__file__).resolve().parents[1] / "deploy" / "genomics-demo.service"
+INSTALLER = Path(__file__).resolve().parents[1] / "scripts" / "install_service.sh"
+
+PLACEHOLDERS = ("__REPO__", "__USER__", "__DATA_ROOT__")
+
+
+def test_the_unit_template_and_installer_exist():
+    assert UNIT_TEMPLATE.is_file()
+    assert INSTALLER.is_file()
+    assert os.access(INSTALLER, os.X_OK), "installer must be executable"
+
+
+def test_every_placeholder_is_substituted(tmp_path):
+    """Simulates the installer's sed step and checks nothing is left behind.
+
+    An unsubstituted token is not valid systemd syntax, so it fails at boot --
+    the one time nobody is watching a terminal.
+    """
+    text = UNIT_TEMPLATE.read_text()
+    for token in PLACEHOLDERS:
+        assert token in text, f"template no longer contains {token}"
+        text = text.replace(token, "/substituted")
+    assert not re.search(r"__(REPO|USER|DATA_ROOT)__", text)
+
+
+def test_the_placeholder_guard_matches_exact_tokens_not_any_underscores():
+    """The installer verifies substitution before enabling the unit.
+
+    It originally grepped for a bare "__", which also matched the template's
+    own comments about substitution and aborted every install. The guard must
+    look for the specific tokens.
+    """
+    installer = INSTALLER.read_text()
+    assert "__(REPO|USER|DATA_ROOT)__" in installer, "guard must match exact placeholder tokens"
+    assert "grep -q '__'" not in installer, "the bare-underscore guard is a false positive"
+
+
+def test_the_unit_waits_for_the_data_mount():
+    """Without this, systemd starts the demo before the NVMe is mounted.
+
+    Pre-flight then reports every dataset missing on a machine where nothing
+    is actually wrong -- an alarming screen with no real fault behind it.
+    """
+    assert "RequiresMountsFor=__DATA_ROOT__" in UNIT_TEMPLATE.read_text()
+
+
+def test_the_unit_does_not_hard_require_docker():
+    """A broken Docker should still leave the UI up showing red checks.
+
+    A booth monitor reporting a fault is more useful than a black screen.
+    """
+    text = UNIT_TEMPLATE.read_text()
+    assert "After=docker.service" in text
+    assert "Requires=docker.service" not in text
+
+
+def test_the_service_does_not_run_as_root():
+    text = UNIT_TEMPLATE.read_text()
+    assert "User=__USER__" in text
+    assert "User=root" not in text
+
+
+def test_the_installer_refuses_a_disposable_checkout():
+    """A service is a long-lived promise and must not point at scratch space.
+
+    The demo was found serving from a Copilot agent worktree, which works
+    until that session is archived and the machine reboots into nothing.
+    """
+    installer = INSTALLER.read_text()
+    assert "/copilot-worktrees/" in installer
+    assert "ALLOW_TEMP_CHECKOUT" in installer, "an override must exist, but be explicit"

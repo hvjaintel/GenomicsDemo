@@ -397,7 +397,50 @@ Nothing to reset. Press the button again — each run writes to its own director
 
 ### End of day
 
-`Ctrl-C` in the terminal running `run_demo.sh`.
+`Ctrl-C` in the terminal running `run_demo.sh` — or `sudo systemctl stop genomics-demo`
+if you installed the service below.
+
+### Starting automatically at boot (recommended for a booth)
+
+A trade-show machine reboots overnight, loses power, or gets switched off by a cleaner,
+and nobody logs in before doors open. Install the demo as a systemd service and it comes
+back on its own:
+
+```bash
+sudo ./scripts/install_service.sh      # install, enable at boot, start now
+sudo ./scripts/install_service.sh --status
+sudo ./scripts/install_service.sh --uninstall
+```
+
+The installer refuses to point the service at a throwaway directory. **Run it from a
+permanent clone** — `/opt/genomics-demo` or `~/GenomicsDemo`, not a worktree or anything
+under `.copilot/`. A service is a long-lived promise, and a unit aimed at scratch space
+works right up until that directory is cleaned up and the machine reboots into nothing.
+`ALLOW_TEMP_CHECKOUT=1` overrides this for a rehearsal, deliberately noisily.
+
+Two details in the unit that matter more than they look:
+
+- **`RequiresMountsFor=<data_root>`** — the staged genomics data lives on a separate NVMe.
+  Without this, systemd cheerfully starts the demo before that disk is mounted and
+  pre-flight reports every dataset missing on a machine where nothing is wrong.
+- **`After=docker.service`, not `Requires=`** — if Docker is unhealthy, the UI still comes
+  up and shows red pre-flight checks. A booth monitor reporting a fault is worth far more
+  than a black screen nobody can diagnose.
+
+The service runs as the invoking user (never root) and the installer refuses to proceed if
+that user is not in the `docker` group — otherwise the service starts happily and every
+run fails.
+
+Verify it properly before the show, by actually rebooting:
+
+```bash
+sudo reboot
+# then, once it is back:
+sudo ./scripts/install_service.sh --status
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7860/
+```
+
+Logs go to the journal: `journalctl -u genomics-demo -f`.
 
 ---
 

@@ -268,7 +268,10 @@ datasets:
     local: "wgs/HG002.novaseq.pcr-free.35x.dedup.grch38_no_alt.bam"
     size_bytes: 46033519192
     md5_b64: "yel1og/WdArz2xgnHXX+Kw=="
-    sha256: ""
+    # Computed from the staged 46 GB file with sha256sum and cross-checked
+    # against the line fetch_data.sh recorded in CHECKSUMS.sha256 at download
+    # time. Two independent reads agreeing, not one value copied forward.
+    sha256: "b5f1255aa08ecda8f0ec01682d32d9a37a7327ca21ea681d94c250f6a2f22de6"
     tier: "wgs"    # only fetched with --with-wgs
     sidecars:
       - url: "https://storage.googleapis.com/deepvariant/case-study-testdata/HG002.novaseq.pcr-free.35x.dedup.grch38_no_alt.bam.bai"

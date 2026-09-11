@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import gzip
+import os
 import json
 import re
 import shutil
@@ -1641,3 +1642,132 @@ def test_docs_only_cite_tests_that_exist():
         cited = set(re.findall(r"\b(test_\w+)", doc.read_text()))
         missing = cited - defined
         assert not missing, f"{doc.name} cites tests that do not exist: {sorted(missing)}"
+
+
+def test_pinned_checksums_are_well_formed(cfg):
+    """A pinned sha256 must be 64 hex characters.
+
+    Pinning turns a cosmetic "not pinned" warning into a hard integrity
+    check, so a truncated or line-wrapped paste does not fail here -- it
+    fails pre-flight on show morning, against a 46 GB file, with a message
+    saying the data is corrupt when the data is fine.
+    """
+    for key, ds in cfg.datasets.items():
+        if not ds.has_recorded_checksum:
+            continue
+        assert re.fullmatch(r"[0-9a-f]{64}", ds.sha256), (
+            f"dataset {key!r} has a malformed sha256: {ds.sha256!r}"
+        )
+
+
+def test_a_derived_dataset_is_not_expected_to_carry_a_checksum(cfg):
+    """The smoke BAM is sliced locally, so there is no upstream hash to pin.
+
+    It must report provenance rather than an unpinned-checksum warning, or
+    pre-flight shows a permanent amber that can never be cleared.
+    """
+    smoke = cfg.dataset("smoke_bam")
+    assert smoke.is_derived
+    assert not smoke.has_recorded_checksum
+    assert "derived locally from" in smoke.provenance
+
+
+def test_the_dataset_card_does_not_warn_about_a_derived_file(cfg):
+    """A derived file has no upstream checksum, so "not pinned" is not a gap.
+
+    Pre-flight already made this distinction; the dataset card did not, which
+    left the smoke sample showing an amber warning that could never be
+    cleared. Only reachable by enabling smoke in the booth picker, which is
+    exactly the kind of latent wrongness that surfaces on show morning.
+    """
+    from app.main import render_dataset
+
+    html = render_dataset(cfg, "smoke")
+    assert "not pinned" not in html
+    assert "derived locally from" in html
+
+
+def test_the_dataset_card_still_warns_when_a_real_download_is_unpinned(cfg):
+    """The derived-file exemption must not swallow the genuine warning."""
+    from app.main import render_dataset
+
+    raw = copy.deepcopy(cfg.raw)
+    raw["datasets"]["chr20_bam"]["sha256"] = ""
+    assert "not pinned" in render_dataset(Config(raw, cfg.source), "chr20")
+
+
+# ---------------------------------------------------------------------------
+# systemd service
+# ---------------------------------------------------------------------------
+
+UNIT_TEMPLATE = Path(__file__).resolve().parents[1] / "deploy" / "genomics-demo.service"
+INSTALLER = Path(__file__).resolve().parents[1] / "scripts" / "install_service.sh"
+
+PLACEHOLDERS = ("__REPO__", "__USER__", "__DATA_ROOT__")
+
+
+def test_the_unit_template_and_installer_exist():
+    assert UNIT_TEMPLATE.is_file()
+    assert INSTALLER.is_file()
+    assert os.access(INSTALLER, os.X_OK), "installer must be executable"
+
+
+def test_every_placeholder_is_substituted(tmp_path):
+    """Simulates the installer's sed step and checks nothing is left behind.
+
+    An unsubstituted token is not valid systemd syntax, so it fails at boot --
+    the one time nobody is watching a terminal.
+    """
+    text = UNIT_TEMPLATE.read_text()
+    for token in PLACEHOLDERS:
+        assert token in text, f"template no longer contains {token}"
+        text = text.replace(token, "/substituted")
+    assert not re.search(r"__(REPO|USER|DATA_ROOT)__", text)
+
+
+def test_the_placeholder_guard_matches_exact_tokens_not_any_underscores():
+    """The installer verifies substitution before enabling the unit.
+
+    It originally grepped for a bare "__", which also matched the template's
+    own comments about substitution and aborted every install. The guard must
+    look for the specific tokens.
+    """
+    installer = INSTALLER.read_text()
+    assert "__(REPO|USER|DATA_ROOT)__" in installer, "guard must match exact placeholder tokens"
+    assert "grep -q '__'" not in installer, "the bare-underscore guard is a false positive"
+
+
+def test_the_unit_waits_for_the_data_mount():
+    """Without this, systemd starts the demo before the NVMe is mounted.
+
+    Pre-flight then reports every dataset missing on a machine where nothing
+    is actually wrong -- an alarming screen with no real fault behind it.
+    """
+    assert "RequiresMountsFor=__DATA_ROOT__" in UNIT_TEMPLATE.read_text()
+
+
+def test_the_unit_does_not_hard_require_docker():
+    """A broken Docker should still leave the UI up showing red checks.
+
+    A booth monitor reporting a fault is more useful than a black screen.
+    """
+    text = UNIT_TEMPLATE.read_text()
+    assert "After=docker.service" in text
+    assert "Requires=docker.service" not in text
+
+
+def test_the_service_does_not_run_as_root():
+    text = UNIT_TEMPLATE.read_text()
+    assert "User=__USER__" in text
+    assert "User=root" not in text
+
+
+def test_the_installer_refuses_a_disposable_checkout():
+    """A service is a long-lived promise and must not point at scratch space.
+
+    The demo was found serving from a Copilot agent worktree, which works
+    until that session is archived and the machine reboots into nothing.
+    """
+    installer = INSTALLER.read_text()
+    assert "/copilot-worktrees/" in installer
+    assert "ALLOW_TEMP_CHECKOUT" in installer, "an override must exist, but be explicit"

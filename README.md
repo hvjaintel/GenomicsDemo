@@ -352,6 +352,10 @@ about the disk holding the images.
 > workload, the floor script, a question bank with answers (including the AMX question,
 > which a well-informed visitor *will* ask), and the wording for handing a question off
 > rather than guessing at it.
+>
+> **Just need to run it, not build or troubleshoot it?** See
+> [`docs/TEAM-QUICKSTART.md`](docs/TEAM-QUICKSTART.md) — the one-page version for booth
+> staff.
 
 ### The morning before doors open
 

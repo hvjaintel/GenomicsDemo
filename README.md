@@ -658,6 +658,13 @@ external stylesheet or script ever reappears.
 
 ## Replicating this demo on another machine
 
+> **Handing this to a visitor rather than a colleague?** See
+> [`docs/AUDIENCE-REBUILD-PROMPT.md`](docs/AUDIENCE-REBUILD-PROMPT.md) — a self-contained
+> prompt they can paste into an AI coding agent on their own hardware. It deliberately
+> does *not* reference this repository, which is private, and it carries the two traps
+> that matter onto machines we will never see: the SMT-contaminated cpuset, and the
+> AMX speedup that is not there.
+
 **What to copy: the git repo, and nothing else.** It is ~2.9 MB, of which 2.4 MB is the
 replay trace. Everything large is deliberately reproducible rather than shipped —
 `git clone` is the whole transfer.

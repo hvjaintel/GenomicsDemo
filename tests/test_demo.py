@@ -1577,6 +1577,18 @@ def test_a_missing_dataset_and_a_malformed_one_report_differently(cfg):
 # ---------------------------------------------------------------------------
 
 PRESENTER_GUIDE = Path(__file__).resolve().parents[1] / "docs" / "PRESENTER-GUIDE.md"
+REBUILD_PROMPT = Path(__file__).resolve().parents[1] / "docs" / "AUDIENCE-REBUILD-PROMPT.md"
+
+
+def all_prose_docs() -> list[Path]:
+    """Every prose doc that can make a checkable claim.
+
+    Discovered by glob rather than listed, so a doc added later is covered by
+    the citation and drift guards automatically instead of silently opting out
+    of them -- which is exactly how a stale claim survives review.
+    """
+    root = Path(__file__).resolve().parents[1]
+    return sorted(root.glob("docs/*.md")) + [root / "README.md"]
 
 
 def test_presenter_guide_exists():
@@ -1638,7 +1650,9 @@ def test_docs_only_cite_tests_that_exist():
     source = Path(__file__).read_text()
     defined = set(re.findall(r"^def (test_\w+)", source, re.MULTILINE))
 
-    for doc in (root / "README.md", root / "docs" / "PRESENTER-GUIDE.md"):
+    docs = all_prose_docs()
+    assert docs, "no prose docs found to check -- the glob is wrong"
+    for doc in docs:
         cited = set(re.findall(r"\b(test_\w+)", doc.read_text()))
         missing = cited - defined
         assert not missing, f"{doc.name} cites tests that do not exist: {sorted(missing)}"
@@ -1771,3 +1785,64 @@ def test_the_installer_refuses_a_disposable_checkout():
     installer = INSTALLER.read_text()
     assert "/copilot-worktrees/" in installer
     assert "ALLOW_TEMP_CHECKOUT" in installer, "an override must exist, but be explicit"
+
+
+def test_rebuild_prompt_data_urls_and_checksums_match_config(cfg):
+    """The audience handout embeds download URLs and sha256 values.
+
+    A visitor pastes this into an agent on their own machine, far from anyone
+    who can help. If config.yaml is re-pinned and the handout is not, their
+    download fails integrity against a file that is perfectly fine, and the
+    error blames the data. Embedding the values is right -- the handout must
+    stand alone -- so the copy has to be checked instead.
+    """
+    text = REBUILD_PROMPT.read_text()
+    for key in ("reference", "chr20_bam"):
+        ds = cfg.datasets[key]
+        assert ds.url in text, f"handout is missing the {key} URL from config.yaml"
+        if ds.has_recorded_checksum:
+            assert ds.sha256 in text, (
+                f"handout quotes a stale sha256 for {key}: config.yaml now says "
+                f"{ds.sha256}"
+            )
+
+
+def test_rebuild_prompt_does_not_promise_an_amx_speedup():
+    """The handout leaves the room and is run unsupervised.
+
+    An agent told to "show acceleration" will happily build an AMX on/off
+    toggle and report noise as a win. The measured answer here is that AMX
+    dispatches nothing on this fp32 model, so the handout must keep telling
+    the agent to verify before claiming rather than assume.
+    """
+    text = REBUILD_PROMPT.read_text()
+    assert "fp32" in text, "handout no longer explains why AMX may do no work"
+    assert "ONEDNN_VERBOSE" in text, "handout lost the way to check AMX dispatch"
+    assert "noise" in text.lower(), "handout lost the warning about reading noise as a win"
+
+
+def test_rebuild_prompt_keeps_the_smt_warning():
+    """The silent failure this whole demo was rebuilt to avoid.
+
+    A cpuset that accidentally contains SMT siblings turns the core-scaling
+    claim into a cores-plus-hyperthreads claim, with no error anywhere. The
+    handout has to carry that warning onto hardware we will never see.
+    """
+    text = REBUILD_PROMPT.read_text()
+    assert "lscpu -p=CPU,CORE" in text, "handout lost the topology-derivation command"
+    assert "SMT" in text or "hyperthread" in text.lower()
+
+
+def test_rebuild_prompt_is_self_contained(cfg):
+    """It is handed to people who cannot clone the private repo.
+
+    A prompt that says "clone this repo" fails for the audience with an auth
+    error that looks like their mistake. Everything it needs must be public.
+    """
+    text = REBUILD_PROMPT.read_text()
+    prompt_body = text.split("## The prompt", 1)[1]
+    for leaked in ("git clone", "hvjaintel"):
+        assert leaked not in prompt_body, (
+            f"the handout prompt tells the reader to {leaked!r}, which they cannot do"
+        )
+    assert cfg.engine("google_deepvariant").image in text, "handout lost the container image"
